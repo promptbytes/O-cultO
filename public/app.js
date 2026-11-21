@@ -12,6 +12,16 @@ import {
 let state = null;
 
 const $ = (id) => document.getElementById(id);
+
+// No pinch-zoom. The viewport tag and CSS (touch-action) handle most
+// browsers and double-tap; iOS Safari ignores those for pinching, so its
+// pinch gestures are cancelled here.
+for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+  document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+}
+document.addEventListener('touchmove', (e) => {
+  if (e.touches.length > 1) e.preventDefault();
+}, { passive: false });
 const views = ['home', 'name', 'invite', 'chat', 'ended'];
 
 function show(name) {
