@@ -7,8 +7,15 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 const { server, wss } = require('../server/server.js');
 
+// Use a local Playwright if installed, else the global one (cloud sessions
+// come with it pre-installed). Without either, these tests are skipped.
 let chromium;
-try { ({ chromium } = require('playwright')); } catch { /* not installed */ }
+try { ({ chromium } = require('playwright')); } catch {
+  try {
+    const globalRoot = require('node:child_process').execSync('npm root -g', { encoding: 'utf8' }).trim();
+    ({ chromium } = require(require('node:path').join(globalRoot, 'playwright')));
+  } catch { /* not installed */ }
+}
 
 let base;
 let browser;
@@ -73,6 +80,30 @@ test('two people chat end to end, and the server only sees ciphertext', { skip: 
   await bob.waitForSelector('#view-ended:not([hidden])');
   assert.strictEqual(await bob.locator('.msg').count(), 0);
   assert.strictEqual(await alice.locator('.msg').count(), 0);
+});
+
+test('the invite QR code decodes to the invite link and opens the chat', { skip: !chromium && 'playwright not available' }, async () => {
+  const jsQR = require('jsqr');
+  const alice = await (await browser.newContext()).newPage();
+  const bob = await (await browser.newContext()).newPage();
+
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  const link = await alice.inputValue('#invite-link');
+
+  // Read the pixels the user would point a camera at, and decode them.
+  const { width, height, data } = await alice.evaluate(() => {
+    const c = document.getElementById('invite-qr');
+    const img = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+    return { width: img.width, height: img.height, data: Array.from(img.data) };
+  });
+  const decoded = jsQR(Uint8ClampedArray.from(data), width, height);
+  assert.ok(decoded, 'QR code should be readable');
+  assert.strictEqual(decoded.data, link);
+
+  // "Scanning" it opens a working chat.
+  await bob.goto(decoded.data);
+  for (const p of [alice, bob]) await p.waitForSelector('#conn-status:text("End-to-end encrypted")');
 });
 
 test('a used link cannot be opened by a third person', { skip: !chromium && 'playwright not available' }, async () => {

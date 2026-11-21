@@ -7,6 +7,7 @@
   <title>O-cultO</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="style.css">
+  <script src="vendor/qrcode.js"></script>
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -30,7 +31,11 @@
     <!-- Invite screen -->
     <section id="view-invite" class="view" hidden>
       <h2>Send this link to one person</h2>
-      <p class="muted">Send it any way you like. The secret part of the link is never sent to the server.</p>
+      <p class="muted">Let them scan the QR code, or send the link any way you like. The secret part of the link is never sent to the server.</p>
+      <figure class="qr">
+        <canvas id="invite-qr" width="440" height="440" role="img" aria-label="QR code of the invite link"></canvas>
+        <figcaption>Scan with a phone camera</figcaption>
+      </figure>
       <div class="linkbox">
         <input id="invite-link" readonly aria-label="Invite link">
         <button id="btn-copy">Copy</button>

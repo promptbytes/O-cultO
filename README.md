@@ -8,7 +8,8 @@ O-cultO is a private one-to-one chat that runs in any modern browser, on a phone
 
 - **End-to-end encrypted.** Messages are encrypted on your device and can only be read on the other person's device.
 - **Nothing is stored.** Messages exist only in the memory of the two open browser tabs. The server writes nothing to disk and keeps no history. The browser writes nothing to local storage, cookies or IndexedDB. Close the tab and the chat is gone.
-- **No accounts.** No phone number, email or username. You start a chat, send the invite link to one person, and talk.
+- **No accounts.** No phone number, email or username. You start a chat, let one person scan the QR code (or send them the invite link), and talk.
+- **Share by QR code.** The QR code is drawn on your own device. Nothing about it is sent anywhere.
 - **Verify.** Both people see a 30-digit safety code. If the codes match when you compare them in person or on a call, no one is in the middle.
 
 ## Run it

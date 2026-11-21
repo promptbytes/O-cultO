@@ -50,11 +50,17 @@ function securityHeaders(req) {
   };
 }
 
+// Third-party browser files, served from our own origin so the strict
+// Content-Security-Policy never has to trust an outside CDN.
+const VENDOR = {
+  '/vendor/qrcode.js': require.resolve('qrcode-generator/qrcode.js'),
+};
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   let file = url.pathname === '/' ? '/index.html' : url.pathname;
-  const full = path.normalize(path.join(PUBLIC_DIR, file));
-  if (!full.startsWith(PUBLIC_DIR + path.sep) || !MIME[path.extname(full)]) {
+  const full = VENDOR[file] || path.normalize(path.join(PUBLIC_DIR, file));
+  if ((!VENDOR[file] && !full.startsWith(PUBLIC_DIR + path.sep)) || !MIME[path.extname(full)]) {
     res.writeHead(404, securityHeaders(req));
     return res.end('Not found');
   }

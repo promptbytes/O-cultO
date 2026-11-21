@@ -24,6 +24,8 @@ function wipe() {
   }
   state = null;
   $('messages').replaceChildren();
+  $('invite-link').value = '';
+  clearQr();
   $('msg-input').value = '';
   $('safety-code').textContent = '—';
   $('verify-panel').hidden = true;
@@ -63,9 +65,41 @@ async function startChat() {
   // server, so person B gets A's real key straight from A.
   const link = `${location.origin}/#r=${state.room}&k=${keys.pub}`;
   $('invite-link').value = link;
+  drawQr($('invite-qr'), link);
   $('invite-status').textContent = 'Waiting for them to open it…';
   show('invite');
   connect();
+}
+
+/** Draw the invite link as a QR code. Made on this device; nothing is sent anywhere. */
+function drawQr(canvas, text) {
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (typeof window.qrcode !== 'function') {
+    canvas.closest('figure').hidden = true;
+    return;
+  }
+  canvas.closest('figure').hidden = false;
+  const qr = window.qrcode(0, 'M'); // auto size, medium error correction
+  qr.addData(text, 'Byte');
+  qr.make();
+  const n = qr.getModuleCount();
+  const quiet = 4; // white border that scanners need
+  const cell = Math.floor(canvas.width / (n + quiet * 2));
+  const offset = Math.floor((canvas.width - cell * n) / 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#000000';
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (qr.isDark(r, c)) ctx.fillRect(offset + c * cell, offset + r * cell, cell, cell);
+    }
+  }
+}
+
+function clearQr() {
+  const canvas = $('invite-qr');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
 }
 
 // ---------- joining a chat (person B) ----------
