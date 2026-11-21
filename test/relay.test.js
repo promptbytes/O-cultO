@@ -112,4 +112,19 @@ test('serves call config and strict security headers', async () => {
   assert.match(page.headers.get('permissions-policy'), /microphone=\(self\)/);
   assert.strictEqual(page.headers.get('cache-control'), 'no-store');
   assert.strictEqual((await fetch(base + '/../package.json')).status, 404);
+
+  // Behind a hosting proxy, the public host is used, not the internal one.
+  const proxied = await new Promise((resolve) => {
+    require('node:http').get(base + '/', { headers: { host: '10.0.0.5:3000', 'x-forwarded-host': 'chat.example.org' } }, resolve);
+  });
+  assert.match(proxied.headers['content-security-policy'], /wss:\/\/chat\.example\.org[ ;]/);
+  assert.doesNotMatch(proxied.headers['content-security-policy'], /10\.0\.0\.5/);
+  proxied.resume();
+
+  // Junk in the header can't reach the policy.
+  const evil = await new Promise((resolve) => {
+    require('node:http').get(base + '/', { headers: { 'x-forwarded-host': "x; script-src *" } }, resolve);
+  });
+  assert.doesNotMatch(evil.headers['content-security-policy'], /script-src \*/);
+  evil.resume();
 });

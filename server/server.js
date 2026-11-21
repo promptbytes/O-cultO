@@ -46,8 +46,20 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
 };
 
+// Host names are limited to safe characters so they can't inject anything
+// into the security policy below.
+const HOST_RE = /^[A-Za-z0-9.-]+(:\d{1,5})?$/;
+
+/** The public host name, even behind a hosting proxy that rewrites Host. */
+function publicHost(req) {
+  const forwarded = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+  if (HOST_RE.test(forwarded)) return forwarded;
+  const host = String(req.headers.host || '');
+  return HOST_RE.test(host) ? host : '';
+}
+
 function securityHeaders(req) {
-  const host = req.headers.host || '';
+  const host = publicHost(req);
   const headers = {
     'Content-Security-Policy': [
       "default-src 'none'",
@@ -55,7 +67,7 @@ function securityHeaders(req) {
       "style-src 'self'",
       "img-src 'self' data:",
       "media-src 'self' blob:",
-      `connect-src 'self' ws://${host} wss://${host}`,
+      host ? `connect-src 'self' ws://${host} wss://${host}` : "connect-src 'self'",
       "base-uri 'none'",
       "form-action 'none'",
       "frame-ancestors 'none'",
