@@ -11,6 +11,7 @@ O-cultO is a private chat app that runs in any modern browser, on a phone or a c
 - **No accounts.** No phone number, email or username. You start a chat, let one person scan the QR code (or send them the invite link), and talk.
 - **Group chats.** Up to 8 people. Everyone sees how many people are connected, so no one can listen in unseen.
 - **Photos, videos and files.** Up to 25 MB each. Photos, videos and audio play in the chat; other files are offered as a download. Each file is encrypted in pieces and lives only in memory, so it's gone when the chat ends unless you tap Save.
+- **Typing dots.** While someone is writing, a bubble with three bouncing dots appears (in groups it says who). The signal is encrypted like a message, and it stops when they send, clear the box or pause for a few seconds.
 - **Voice messages.** Tap 🎤 to record in the app (up to 5 minutes), then Send or Cancel.
 - **Voice calls (off by default).** Built in, but switched off because without a STUN/TURN server they rarely connect between different networks. Turn on with `ENABLE_CALLS=1`.
 - **Share by QR code.** The QR code is drawn on your own device. Nothing about it is sent anywhere.

@@ -56,6 +56,11 @@ function wipe() {
     }
   }
   state = null;
+  if (state) {
+    clearTimeout(state.typingIdle);
+    for (const t of state.typers.values()) clearTimeout(t);
+  }
+  typingEl = null;
   $('messages').replaceChildren();
   $('call-audio').replaceChildren();
   $('msg-input').value = '';
@@ -90,6 +95,10 @@ function newState(extra) {
     recvChain: Promise.resolve(),
     fileChain: Promise.resolve(), // outgoing files go one at a time
     incoming: new Map(), // "<from>:<id>" -> file being received
+    typers: new Map(), // peer id -> timer that hides their "typing" dots
+    typingOn: false, // whether we've told the others we're typing
+    typingSentAt: 0,
+    typingIdle: null,
     urls: [], // in-memory file links, revoked on wipe
     ...extra,
   };
@@ -256,6 +265,7 @@ async function handleServer(msg) {
       if (t.from === msg.id) { t.ui.fail('the sender left before it arrived'); s.incoming.delete(key); }
     }
     s.calls.peerLeft(msg.id);
+    setTyping(msg.id, false);
     if (s.mode === 'pair') {
       if (s.session) return end('Chat ended', 'The other person left. Every message has been wiped from this device.');
       if (s.role === 'a') $('invite-status').textContent = 'Waiting for them to open it…';
@@ -323,7 +333,11 @@ async function handlePeer(from, env) {
       return renderPeople();
     }
 
+    case 'typing':
+      return setTyping(from, body.on === true);
+
     case 'text':
+      setTyping(from, false);
       if (typeof body.text === 'string') {
         const who = s.mode === 'group' ? (s.names.get(sid) || 'Someone') : null;
         addMessage(body.text.slice(0, 4000), 'them', who);
@@ -331,6 +345,9 @@ async function handlePeer(from, env) {
       return;
 
     case 'file-start':
+      setTyping(from, false);
+      return receiveFile(from, sid, body);
+
     case 'file-chunk':
     case 'file-end':
     case 'file-cancel':
@@ -456,6 +473,7 @@ function bubble(who, sender) {
     li.prepend(b);
   }
   $('messages').append(li);
+  keepTypingLast();
   li.scrollIntoView({ block: 'end' });
   return li;
 }
@@ -591,6 +609,7 @@ async function startRecording() {
   if (!state?.ready || recorder.active) return;
   try {
     await recorder.start();
+    stopTyping();
     showRecorder(true);
   } catch {
     addNote('Could not use your microphone. Check that this site is allowed to use it.');
@@ -608,11 +627,105 @@ async function finishRecording(send) {
   $('msg-input').focus();
 }
 
+// ---------- "is typing" indicator ----------
+//
+// While you type, an encrypted { t: 'typing' } goes out at most every few
+// seconds; it stops when you send, clear the box, or pause. The relay can't
+// tell these apart from any other message.
+
+const TYPING_RESEND_MS = 2500; // re-announce this often while typing
+const TYPING_IDLE_MS = 4000; // a pause this long counts as stopped
+const TYPING_SHOW_MS = 6000; // hide someone's dots if no update arrives
+
+let typingEl = null;
+
+function onTypingInput() {
+  const s = state;
+  if (!s?.ready) return;
+  clearTimeout(s.typingIdle);
+  if (!$('msg-input').value.trim()) return stopTyping();
+  const now = Date.now();
+  if (!s.typingOn || now - s.typingSentAt > TYPING_RESEND_MS) {
+    s.typingOn = true;
+    s.typingSentAt = now;
+    sendBody({ t: 'typing', on: true });
+  }
+  s.typingIdle = setTimeout(stopTyping, TYPING_IDLE_MS);
+}
+
+/** Tell the others we stopped typing. */
+function stopTyping() {
+  const s = state;
+  if (!s) return;
+  clearTimeout(s.typingIdle);
+  if (s.typingOn) {
+    s.typingOn = false;
+    sendBody({ t: 'typing', on: false });
+  }
+}
+
+/** Forget we were typing without telling anyone (a message is on its way). */
+function quietTyping() {
+  if (!state) return;
+  clearTimeout(state.typingIdle);
+  state.typingOn = false;
+}
+
+function setTyping(from, on) {
+  const s = state;
+  if (!s) return;
+  clearTimeout(s.typers.get(from));
+  if (on) s.typers.set(from, setTimeout(() => setTyping(from, false), TYPING_SHOW_MS));
+  else s.typers.delete(from);
+  renderTyping();
+}
+
+function renderTyping() {
+  const s = state;
+  if (!s || s.typers.size === 0) {
+    typingEl?.remove();
+    return;
+  }
+  if (!typingEl) {
+    typingEl = document.createElement('li');
+    typingEl.className = 'msg them typing';
+    typingEl.setAttribute('role', 'status');
+    const label = document.createElement('b');
+    label.className = 'sender';
+    const dots = document.createElement('span');
+    dots.className = 'dots';
+    dots.setAttribute('aria-hidden', 'true');
+    dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
+    typingEl.append(label, dots);
+  }
+  const label = typingEl.querySelector('.sender');
+  if (s.mode === 'group') {
+    const names = [...s.typers.keys()].map((id) => s.members.get(id) || 'Someone');
+    label.textContent = names.length === 1 ? `${names[0]} is typing`
+      : names.length === 2 ? `${names[0]} and ${names[1]} are typing`
+      : `${names.length} people are typing`;
+    label.hidden = false;
+  } else {
+    label.textContent = 'Typing';
+    label.hidden = true;
+  }
+  typingEl.setAttribute('aria-label', label.textContent);
+  const list = $('messages');
+  const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+  if (!typingEl.isConnected) list.append(typingEl);
+  if (nearBottom) typingEl.scrollIntoView({ block: 'end' });
+}
+
+function keepTypingLast() {
+  if (typingEl?.isConnected) $('messages').append(typingEl);
+}
+
 function addNote(text) {
   const li = document.createElement('li');
   li.className = 'note';
   li.textContent = text;
   $('messages').append(li);
+  keepTypingLast();
   li.scrollIntoView({ block: 'end' });
 }
 
@@ -622,6 +735,7 @@ async function sendMessage(e) {
   const text = input.value.trim();
   if (!text || !state?.ready) return;
   input.value = '';
+  quietTyping();
   sendBody({ t: 'text', text });
   addMessage(text, 'me');
 }
@@ -690,6 +804,8 @@ $('btn-call-join').onclick = startCall;
 $('btn-mute').onclick = () => state?.calls.toggleMute();
 $('btn-hangup').onclick = () => state?.calls.hangup();
 $('composer').onsubmit = sendMessage;
+$('msg-input').addEventListener('input', onTypingInput);
+$('msg-input').addEventListener('blur', stopTyping);
 $('btn-attach').onclick = () => $('file-input').click();
 $('file-input').onchange = () => {
   for (const file of $('file-input').files) sendFile(file);

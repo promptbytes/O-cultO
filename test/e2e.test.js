@@ -328,6 +328,69 @@ test('files in a group reach everyone with the sender name', SKIP, async () => {
   }
 });
 
+test('typing dots: show while typing, hide on send, clear or pause', SKIP, async () => {
+  const { alice, bob } = await privateChat();
+  const dots = '.msg.typing';
+
+  // Typing shows the bubble with three animated dots on the other side.
+  await alice.type('#msg-input', 'hel');
+  await bob.waitForSelector(dots);
+  assert.strictEqual(await bob.locator(`${dots} .dots i`).count(), 3);
+  assert.strictEqual(await alice.locator(dots).count(), 0, 'you never see your own dots');
+  assert.notStrictEqual(await bob.$eval(`${dots} .dots i`, (el) => getComputedStyle(el).animationName), 'none');
+
+  // Sending removes it as the message arrives, and it stays below messages.
+  await alice.type('#msg-input', 'lo');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("hello")');
+  await bob.waitForSelector(dots, { state: 'detached' });
+
+  // Clearing the box removes it.
+  await alice.type('#msg-input', 'wait');
+  await bob.waitForSelector(dots);
+  await bob.fill('#msg-input', 'x'); // Bob typing doesn't hide Alice's dots
+  await alice.fill('#msg-input', '');
+  await alice.dispatchEvent('#msg-input', 'input');
+  await bob.waitForSelector(dots, { state: 'detached' });
+
+  // A pause counts as stopped.
+  await alice.type('#msg-input', 'thinking');
+  await bob.waitForSelector(dots);
+  await bob.waitForSelector(dots, { state: 'detached', timeout: 8000 });
+
+  // A new message keeps the dots at the very bottom.
+  await alice.type('#msg-input', 'again');
+  await bob.waitForSelector(dots);
+  await bob.fill('#msg-input', 'meanwhile');
+  await bob.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.me:has-text("meanwhile")');
+  assert.ok(await bob.$eval('#messages', (ul) => ul.lastElementChild.classList.contains('typing')));
+
+  // The relay only ever saw ciphertext.
+  assert.ok(!seenByServer.join('\n').includes('typing'));
+});
+
+test('typing dots in a group say who is typing', SKIP, async () => {
+  const ana = await person();
+  await ana.goto(base);
+  await ana.click('#btn-new-group');
+  await ana.fill('#name-input', 'Ana');
+  await ana.click('#name-form button');
+  const link = await ana.inputValue('#group-link');
+  const ben = await person();
+  const cy = await person();
+  await joinGroup(ben, link, 'Ben');
+  await joinGroup(cy, link, 'Cy');
+  for (const p of [ana, ben, cy]) await p.waitForSelector('#conn-status:text("3 people")');
+
+  await ben.type('#msg-input', 'hi');
+  await ana.waitForSelector('.msg.typing .sender:text("Ben is typing")');
+  await cy.type('#msg-input', 'yo');
+  await ana.waitForSelector('.msg.typing .sender:text("Ben and Cy are typing")');
+  await ben.press('#msg-input', 'Enter');
+  await ana.waitForSelector('.msg.typing .sender:text("Cy is typing")');
+});
+
 test('a used link cannot be opened by a third person', { skip: !chromium && 'playwright not available' }, async () => {
   const alice = await (await browser.newContext()).newPage();
   const bob = await (await browser.newContext()).newPage();
