@@ -126,3 +126,64 @@ export async function safetyCode(pubA, pubB) {
   }
   return groups.join(' ');
 }
+
+// ---------------------------------------------------------------------------
+// Group chats (v1)
+//
+//   * The person who starts the group makes a random 256-bit group secret.
+//     It travels only inside the invite link's #fragment or QR code, which
+//     are never sent to the server.
+//   * The AES-256-GCM key comes from HKDF-SHA256(secret, salt = room id).
+//   * Each person picks a random sender id for this session. Every message
+//     carries the sender id and a counter, both bound into the GCM additional
+//     data, so messages can't be replayed, reordered or moved to another room.
+//   * Anyone holding the link can read the group. Share it only with the
+//     people you mean to invite (showing the QR code in person is best).
+// ---------------------------------------------------------------------------
+
+export function newGroupSecret() {
+  return b64u(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+export async function deriveGroup({ secret, room }) {
+  const raw = unb64u(secret);
+  if (raw.length !== 32) throw new Error('bad group secret');
+  const hk = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('O-cultO group v1 ' + room), info: enc.encode('group') },
+    hk,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+  return { key, room, sid: randomId(12), sendCounter: 0, lastRecv: new Map() };
+}
+
+function groupAad(room, sid, n) {
+  return enc.encode(`O-cultO group v1|${room}|${sid}|${n}`);
+}
+
+export async function sealGroup(g, value) {
+  const n = g.sendCounter++;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: groupAad(g.room, g.sid, n) },
+    g.key,
+    enc.encode(JSON.stringify(value)),
+  );
+  return JSON.stringify({ k: 'g', s: g.sid, n, iv: b64u(iv), ct: b64u(ct) });
+}
+
+/** Returns { sid, body }. Throws if tampered with, replayed or reordered. */
+export async function openGroup(g, env) {
+  if (typeof env.s !== 'string' || env.s === g.sid || !Number.isSafeInteger(env.n)) throw new Error('bad');
+  const last = g.lastRecv.has(env.s) ? g.lastRecv.get(env.s) : -1;
+  if (env.n <= last) throw new Error('replay');
+  const pt = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: unb64u(env.iv), additionalData: groupAad(g.room, env.s, env.n) },
+    g.key,
+    unb64u(env.ct),
+  );
+  g.lastRecv.set(env.s, env.n);
+  return { sid: env.s, body: JSON.parse(dec.decode(pt)) };
+}

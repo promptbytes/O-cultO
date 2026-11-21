@@ -1,0 +1,49 @@
+# Self-host O-cultO with automatic HTTPS.
+#
+#   1. Point a domain (e.g. chat.example.org) at your server.
+#   2. Copy .env.example to .env and fill it in.
+#   3. docker compose up -d
+#
+# Nothing here writes chats to disk. Caddy only stores its HTTPS certificate.
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    environment:
+      ICE_SERVERS: ${ICE_SERVERS:-[]}
+    # No logs are kept, so nothing about who connected is ever written.
+    logging:
+      driver: none
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    logging:
+      driver: none
+
+  # Optional: helps voice calls get through strict home routers and mobile
+  # networks. Audio passing through it stays encrypted end to end.
+  # Start it with: docker compose --profile turn up -d
+  coturn:
+    image: coturn/coturn:4.6
+    profiles: ["turn"]
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n --no-cli --no-tls --no-dtls --log-file=stdout --simple-log
+      --realm=${DOMAIN} --fingerprint --lt-cred-mech
+      --user=${TURN_USER}:${TURN_PASSWORD}
+      --listening-port=3478 --min-port=49160 --max-port=49200
+      --no-multicast-peers --denied-peer-ip=10.0.0.0-10.255.255.255
+      --denied-peer-ip=172.16.0.0-172.31.255.255 --denied-peer-ip=192.168.0.0-192.168.255.255
+    logging:
+      driver: none
+
+volumes:
+  caddy_data:

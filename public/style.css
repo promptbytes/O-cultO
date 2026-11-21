@@ -102,15 +102,33 @@ button.small { padding: 6px 12px; font-size: 14px; }
 }
 .chat-head .title { font-weight: 600; }
 .chat-head .sub { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
-.head-actions { display: flex; gap: 8px; }
+.head-text { min-width: 0; }
+.head-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.head-actions [hidden] { display: none; }
 
-.verify { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
-.verify[hidden] { display: none; }
-.verify p { margin: 0 0 8px; color: var(--muted); font-size: 14px; }
-.verify code { font-size: 20px; letter-spacing: .08em; color: var(--accent); word-spacing: .3em; }
+.call-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 12px; padding: 10px 12px; border-radius: 12px;
+  background: #1b2a22; border: 1px solid #2f5b43;
+}
+.call-bar[hidden] { display: none; }
+.call-bar [hidden] { display: none; }
+.call-bar[data-state="ringing"] { background: #2a2216; border-color: #6b5326; }
+.call-bar[data-state="ringing"] .call-icon { color: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
+.call-icon { color: var(--ok); }
+.call-text { flex: 1; min-width: 140px; font-size: 14px; }
+
+.muted-inline { color: var(--muted); font-weight: 400; }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; display: grid; gap: 10px; }
+.panel[hidden] { display: none; }
+.panel p { margin: 0; color: var(--muted); font-size: 14px; }
+.panel .qr canvas { width: 180px; height: 180px; }
+.panel code { font-size: 20px; letter-spacing: .08em; color: var(--accent); word-spacing: .3em; }
 
 .messages { list-style: none; margin: 0; padding: 16px 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .msg { max-width: 80%; padding: 8px 12px 6px; border-radius: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.msg .sender { display: block; font-size: 12px; color: var(--accent); margin-bottom: 2px; }
 .msg time { display: block; font-size: 11px; color: #ffffff80; text-align: right; margin-top: 2px; }
 .msg.me { align-self: flex-end; background: var(--me); border-bottom-right-radius: 4px; }
 .msg.them { align-self: flex-start; background: var(--them); border-bottom-left-radius: 4px; }

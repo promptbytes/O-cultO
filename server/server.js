@@ -1,43 +1,60 @@
 // O-cultO relay server.
 //
 // This server is deliberately "dumb":
-//   * It never sees plaintext: clients encrypt end-to-end before sending.
+//   * It never sees plaintext: clients encrypt end-to-end before sending,
+//     including the set-up messages for voice calls.
 //   * It never writes anything to disk and keeps no message history.
 //   * It does not log messages, room ids or IP addresses.
-//   * A room exists only in memory while at least one person is connected,
-//     and holds at most two people.
-// All it does is pass opaque encrypted blobs from one socket to the other.
+//   * A room exists only in memory while at least one person is connected.
+//     A private chat holds 2 people, a group up to 8.
+// All it does is pass opaque encrypted blobs between the sockets in a room.
 
 'use strict';
 
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { WebSocketServer } = require('ws');
 
 const PORT = Number(process.env.PORT) || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-const MAX_FRAME_BYTES = 64 * 1024; // one encrypted message
-const MAX_MSGS_PER_10S = 50; // simple per-connection flood limit
+const MAX_FRAME_BYTES = 64 * 1024; // one encrypted message or call offer
+const MAX_MSGS_PER_10S = 200; // per-connection flood limit (calls send bursts)
 const ROOM_ID_RE = /^[A-Za-z0-9_-]{22,64}$/;
+const CAPACITY = { pair: 2, group: 8 };
+
+// STUN/TURN servers that help voice calls get through home routers and
+// mobile networks. Empty by default so no third party learns anyone's IP;
+// set ICE_SERVERS to a JSON array, e.g. '[{"urls":"stun:turn.example.org"}]'.
+let ICE_SERVERS = [];
+try {
+  ICE_SERVERS = JSON.parse(process.env.ICE_SERVERS || '[]');
+  if (!Array.isArray(ICE_SERVERS)) throw new Error('not an array');
+} catch {
+  console.error('ICE_SERVERS must be a JSON array; ignoring it.');
+  ICE_SERVERS = [];
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8',
 };
 
 function securityHeaders(req) {
   const host = req.headers.host || '';
-  return {
+  const headers = {
     'Content-Security-Policy': [
       "default-src 'none'",
       "script-src 'self'",
       "style-src 'self'",
       "img-src 'self' data:",
+      "media-src 'self' blob:",
       `connect-src 'self' ws://${host} wss://${host}`,
       "base-uri 'none'",
       "form-action 'none'",
@@ -46,8 +63,12 @@ function securityHeaders(req) {
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'no-store',
-    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()',
   };
+  if (req.headers['x-forwarded-proto'] === 'https') {
+    headers['Strict-Transport-Security'] = 'max-age=31536000';
+  }
+  return headers;
 }
 
 // Third-party browser files, served from our own origin so the strict
@@ -58,7 +79,17 @@ const VENDOR = {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
-  let file = url.pathname === '/' ? '/index.html' : url.pathname;
+
+  if (url.pathname === '/healthz') {
+    res.writeHead(200, { ...securityHeaders(req), 'Content-Type': 'text/plain' });
+    return res.end('ok');
+  }
+  if (url.pathname === '/config.json') {
+    res.writeHead(200, { ...securityHeaders(req), 'Content-Type': MIME['.json'] });
+    return res.end(JSON.stringify({ iceServers: ICE_SERVERS }));
+  }
+
+  const file = url.pathname === '/' ? '/index.html' : url.pathname;
   const full = VENDOR[file] || path.normalize(path.join(PUBLIC_DIR, file));
   if ((!VENDOR[file] && !full.startsWith(PUBLIC_DIR + path.sep)) || !MIME[path.extname(full)]) {
     res.writeHead(404, securityHeaders(req));
@@ -74,7 +105,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-/** roomId -> Set<WebSocket>; in memory only. */
+/** roomId -> { mode, peers: Map<id, WebSocket> }; in memory only. */
 const rooms = new Map();
 
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_FRAME_BYTES });
@@ -86,21 +117,23 @@ function send(ws, obj) {
 function leave(ws) {
   const room = ws.roomId && rooms.get(ws.roomId);
   if (!room) return;
-  room.delete(ws);
-  for (const peer of room) send(peer, { type: 'peer-left' });
-  if (room.size === 0) rooms.delete(ws.roomId);
+  room.peers.delete(ws.peerId);
+  for (const peer of room.peers.values()) send(peer, { type: 'peer-left', id: ws.peerId });
+  if (room.peers.size === 0) rooms.delete(ws.roomId);
   ws.roomId = null;
 }
 
 wss.on('connection', (ws) => {
   ws.isAlive = true;
   ws.roomId = null;
+  // A random id for this connection only, so people in a room can address
+  // each other. It says nothing about who anyone is.
+  ws.peerId = crypto.randomBytes(9).toString('base64url');
   ws.window = { start: Date.now(), count: 0 };
 
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw, isBinary) => {
-    // Flood limit.
     const now = Date.now();
     if (now - ws.window.start > 10_000) ws.window = { start: now, count: 0 };
     if (++ws.window.count > MAX_MSGS_PER_10S) return ws.close(1008, 'rate limit');
@@ -111,24 +144,33 @@ wss.on('connection', (ws) => {
     if (!msg || typeof msg !== 'object') return;
 
     if (msg.type === 'join') {
+      const mode = msg.mode === 'group' ? 'group' : 'pair';
       if (ws.roomId || typeof msg.room !== 'string' || !ROOM_ID_RE.test(msg.room)) {
         return send(ws, { type: 'error', reason: 'bad-room' });
       }
       let room = rooms.get(msg.room);
-      if (!room) rooms.set(msg.room, (room = new Set()));
-      if (room.size >= 2) return send(ws, { type: 'error', reason: 'room-full' });
-      room.add(ws);
+      if (!room) rooms.set(msg.room, (room = { mode, peers: new Map() }));
+      if (room.mode !== mode) return send(ws, { type: 'error', reason: 'bad-room' });
+      if (room.peers.size >= CAPACITY[mode]) return send(ws, { type: 'error', reason: 'room-full' });
+      const others = [...room.peers.keys()];
+      room.peers.set(ws.peerId, ws);
       ws.roomId = msg.room;
-      send(ws, { type: 'joined', peers: room.size - 1 });
-      for (const peer of room) if (peer !== ws) send(peer, { type: 'peer-joined' });
+      send(ws, { type: 'joined', id: ws.peerId, peers: others });
+      for (const [id, peer] of room.peers) if (id !== ws.peerId) send(peer, { type: 'peer-joined', id: ws.peerId });
       return;
     }
 
     if (msg.type === 'relay') {
       const room = ws.roomId && rooms.get(ws.roomId);
       if (!room || typeof msg.data !== 'string') return;
+      const out = { type: 'relay', from: ws.peerId, data: msg.data };
       // Forward the opaque, already-encrypted payload. Nothing is stored.
-      for (const peer of room) if (peer !== ws) send(peer, { type: 'relay', data: msg.data });
+      if (typeof msg.to === 'string') {
+        const peer = room.peers.get(msg.to);
+        if (peer && peer !== ws) send(peer, out);
+      } else {
+        for (const peer of room.peers.values()) if (peer !== ws) send(peer, out);
+      }
       return;
     }
 

@@ -20,15 +20,27 @@
         <p class="tag">Private chat that leaves no trace.</p>
       </div>
       <ul class="promises">
-        <li><b>End-to-end encrypted.</b> Only the two of you can read it.</li>
+        <li><b>End-to-end encrypted.</b> Messages and voice calls. Only the people in the chat can read or hear them.</li>
         <li><b>Nothing is stored.</b> Not on a server, not in a cloud, not on your device.</li>
         <li><b>No accounts.</b> No phone number, email or name needed.</li>
       </ul>
       <button id="btn-new" class="primary">Start a private chat</button>
+      <button id="btn-new-group">Start a group chat <span class="muted-inline">(up to 8)</span></button>
       <p class="fine">Close the tab and the chat is gone for good.</p>
     </section>
 
-    <!-- Invite screen -->
+    <!-- Name screen (groups) -->
+    <section id="view-name" class="view" hidden>
+      <h2 id="name-title">Join the group</h2>
+      <p class="muted">Pick a name the others will see. It is only kept for as long as this tab is open.</p>
+      <form id="name-form" class="linkbox" autocomplete="off">
+        <input id="name-input" maxlength="40" placeholder="Your name" aria-label="Your name" required>
+        <button class="primary">Continue</button>
+      </form>
+      <button id="btn-name-cancel" class="ghost">Cancel</button>
+    </section>
+
+    <!-- Invite screen (private chat) -->
     <section id="view-invite" class="view" hidden>
       <h2>Send this link to one person</h2>
       <p class="muted">Let them scan the QR code, or send the link any way you like. The secret part of the link is never sent to the server.</p>
@@ -38,29 +50,51 @@
       </figure>
       <div class="linkbox">
         <input id="invite-link" readonly aria-label="Invite link">
-        <button id="btn-copy">Copy</button>
+        <button id="btn-copy" data-copy="invite-link">Copy</button>
       </div>
       <p class="status"><span class="dot pulse"></span> <span id="invite-status">Waiting for them to open it…</span></p>
       <p class="fine">Keep this tab open. If you close it, the link stops working.</p>
       <button id="btn-cancel" class="ghost">Cancel</button>
     </section>
 
-    <!-- Chat screen -->
+    <!-- Chat screen (private and group) -->
     <section id="view-chat" class="view chat" hidden>
       <header class="chat-head">
-        <div>
-          <div class="title">Private chat</div>
+        <div class="head-text">
+          <div class="title" id="chat-title">Private chat</div>
           <div class="sub"><span id="conn-dot" class="dot"></span> <span id="conn-status">Connecting…</span></div>
         </div>
         <div class="head-actions">
+          <button id="btn-call" class="ghost small" disabled>Call</button>
+          <button id="btn-invite" class="ghost small" hidden>Invite</button>
           <button id="btn-verify" class="ghost small">Verify</button>
           <button id="btn-end" class="danger small">End</button>
         </div>
       </header>
 
-      <div id="verify-panel" class="verify" hidden>
+      <div id="call-bar" class="call-bar" hidden>
+        <span class="call-icon" aria-hidden="true">●</span>
+        <span id="call-text" class="call-text"></span>
+        <button id="btn-call-join" class="primary small" hidden>Join</button>
+        <button id="btn-mute" class="small" hidden>Mute</button>
+        <button id="btn-hangup" class="danger small" hidden>Hang up</button>
+      </div>
+      <div id="call-audio" hidden></div>
+
+      <div id="verify-panel" class="panel" hidden>
         <p>Compare this code with the other person in person or on a call. If it matches, no one is listening in.</p>
         <code id="safety-code">—</code>
+      </div>
+
+      <div id="group-invite-panel" class="panel" hidden>
+        <p>Anyone with this link or QR code can join and read the group, so share it only with the people you want in it. Showing the QR code in person is safest.</p>
+        <figure class="qr">
+          <canvas id="group-qr" width="440" height="440" role="img" aria-label="QR code of the group invite link"></canvas>
+        </figure>
+        <div class="linkbox">
+          <input id="group-link" readonly aria-label="Group invite link">
+          <button data-copy="group-link">Copy</button>
+        </div>
       </div>
 
       <ol id="messages" class="messages" aria-live="polite"></ol>
@@ -76,7 +110,7 @@
       <div class="sigil" aria-hidden="true">○</div>
       <h2 id="ended-title">Chat ended</h2>
       <p id="ended-text" class="muted">Every message has been wiped from this device.</p>
-      <button id="btn-home" class="primary">Start a new chat</button>
+      <button id="btn-home" class="primary">Back to start</button>
     </section>
   </main>
 </body>
