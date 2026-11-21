@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>O-cultO</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <main id="app">
+    <!-- Start screen -->
+    <section id="view-home" class="view">
+      <div class="brand">
+        <div class="sigil" aria-hidden="true">◉</div>
+        <h1>O-cultO</h1>
+        <p class="tag">Private chat that leaves no trace.</p>
+      </div>
+      <ul class="promises">
+        <li><b>End-to-end encrypted.</b> Only the two of you can read it.</li>
+        <li><b>Nothing is stored.</b> Not on a server, not in a cloud, not on your device.</li>
+        <li><b>No accounts.</b> No phone number, email or name needed.</li>
+      </ul>
+      <button id="btn-new" class="primary">Start a private chat</button>
+      <p class="fine">Close the tab and the chat is gone for good.</p>
+    </section>
+
+    <!-- Invite screen -->
+    <section id="view-invite" class="view" hidden>
+      <h2>Send this link to one person</h2>
+      <p class="muted">Send it any way you like. The secret part of the link is never sent to the server.</p>
+      <div class="linkbox">
+        <input id="invite-link" readonly aria-label="Invite link">
+        <button id="btn-copy">Copy</button>
+      </div>
+      <p class="status"><span class="dot pulse"></span> <span id="invite-status">Waiting for them to open it…</span></p>
+      <p class="fine">Keep this tab open. If you close it, the link stops working.</p>
+      <button id="btn-cancel" class="ghost">Cancel</button>
+    </section>
+
+    <!-- Chat screen -->
+    <section id="view-chat" class="view chat" hidden>
+      <header class="chat-head">
+        <div>
+          <div class="title">Private chat</div>
+          <div class="sub"><span id="conn-dot" class="dot"></span> <span id="conn-status">Connecting…</span></div>
+        </div>
+        <div class="head-actions">
+          <button id="btn-verify" class="ghost small">Verify</button>
+          <button id="btn-end" class="danger small">End</button>
+        </div>
+      </header>
+
+      <div id="verify-panel" class="verify" hidden>
+        <p>Compare this code with the other person in person or on a call. If it matches, no one is listening in.</p>
+        <code id="safety-code">—</code>
+      </div>
+
+      <ol id="messages" class="messages" aria-live="polite"></ol>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <input id="msg-input" maxlength="4000" placeholder="Message" aria-label="Message" disabled>
+        <button id="btn-send" class="primary" disabled>Send</button>
+      </form>
+    </section>
+
+    <!-- End / error screen -->
+    <section id="view-ended" class="view" hidden>
+      <div class="sigil" aria-hidden="true">○</div>
+      <h2 id="ended-title">Chat ended</h2>
+      <p id="ended-text" class="muted">Every message has been wiped from this device.</p>
+      <button id="btn-home" class="primary">Start a new chat</button>
+    </section>
+  </main>
+</body>
+</html>

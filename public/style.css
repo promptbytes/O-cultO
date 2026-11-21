@@ -1,0 +1,114 @@
+:root {
+  --bg: #0d0b12;
+  --panel: #17141f;
+  --panel-2: #211c2c;
+  --text: #ece8f4;
+  --muted: #9a93a8;
+  --accent: #b48cff;
+  --accent-ink: #160f24;
+  --me: #4b2f86;
+  --them: #262031;
+  --ok: #57d68d;
+  --warn: #e6b450;
+  --danger: #ff6b7a;
+  --line: #2c2638;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  background: radial-gradient(1200px 600px at 50% -10%, #241a3a 0%, var(--bg) 60%) fixed, var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#app {
+  max-width: 640px;
+  height: 100%;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.view {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+  padding: 32px 0;
+}
+.view[hidden] { display: none; }
+
+.brand { text-align: center; }
+.sigil { font-size: 56px; color: var(--accent); line-height: 1; text-align: center; text-shadow: 0 0 24px #b48cff66; }
+h1 { margin: 8px 0 0; font-size: 40px; letter-spacing: .04em; }
+h2 { margin: 0; font-size: 24px; }
+.tag { margin: 4px 0 0; color: var(--muted); }
+
+.promises { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 10px; }
+.promises li { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; color: var(--muted); }
+.promises b { color: var(--text); }
+
+.muted { color: var(--muted); margin: 0; }
+.fine { color: var(--muted); font-size: 13px; text-align: center; margin: 0; }
+
+button {
+  font: inherit;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 12px 18px;
+  cursor: pointer;
+}
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+button.ghost { background: transparent; }
+button.danger { background: transparent; color: var(--danger); border-color: #ff6b7a55; }
+button.small { padding: 6px 12px; font-size: 14px; }
+
+.linkbox { display: flex; gap: 8px; }
+.linkbox input, .composer input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.linkbox input { font-family: ui-monospace, monospace; font-size: 13px; }
+
+.status { display: flex; align-items: center; gap: 8px; margin: 0; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); display: inline-block; flex: none; }
+.dot.ok { background: var(--ok); }
+.pulse { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+
+/* chat */
+.chat { justify-content: flex-start; height: 100%; padding: 0; gap: 0; }
+.chat-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 0; border-bottom: 1px solid var(--line);
+}
+.chat-head .title { font-weight: 600; }
+.chat-head .sub { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.head-actions { display: flex; gap: 8px; }
+
+.verify { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+.verify[hidden] { display: none; }
+.verify p { margin: 0 0 8px; color: var(--muted); font-size: 14px; }
+.verify code { font-size: 20px; letter-spacing: .08em; color: var(--accent); word-spacing: .3em; }
+
+.messages { list-style: none; margin: 0; padding: 16px 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.msg { max-width: 80%; padding: 8px 12px 6px; border-radius: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.msg time { display: block; font-size: 11px; color: #ffffff80; text-align: right; margin-top: 2px; }
+.msg.me { align-self: flex-end; background: var(--me); border-bottom-right-radius: 4px; }
+.msg.them { align-self: flex-start; background: var(--them); border-bottom-left-radius: 4px; }
+.note { align-self: center; text-align: center; color: var(--muted); font-size: 13px; max-width: 90%; }
+
+.composer { display: flex; gap: 8px; padding: 12px 0 16px; border-top: 1px solid var(--line); }
