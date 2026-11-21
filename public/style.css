@@ -135,3 +135,28 @@ button.small { padding: 6px 12px; font-size: 14px; }
 .note { align-self: center; text-align: center; color: var(--muted); font-size: 13px; max-width: 90%; }
 
 .composer { display: flex; gap: 8px; padding: 12px 0 16px; border-top: 1px solid var(--line); }
+
+/* attach / record buttons */
+button.icon { padding: 0; width: 46px; flex: none; font-size: 20px; line-height: 1; background: var(--panel); }
+.composer[hidden] { display: none; }
+
+/* voice recorder bar */
+.recorder {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 0 16px; border-top: 1px solid var(--line);
+}
+.recorder[hidden] { display: none; }
+.rec-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--danger); animation: pulse 1s ease-in-out infinite; flex: none; }
+.rec-label { color: var(--muted); }
+.recorder time { flex: 1; font-variant-numeric: tabular-nums; font-size: 18px; }
+
+/* files and media in bubbles */
+.msg .file { display: grid; gap: 6px; min-width: 200px; }
+.msg .file-label { font-size: 14px; overflow-wrap: anywhere; }
+.msg .file.failed .file-label { color: var(--danger); }
+.msg progress { width: 100%; height: 6px; accent-color: var(--accent); }
+.msg .media { display: block; max-width: 100%; border-radius: 10px; }
+.msg img.media, .msg video.media { max-height: 320px; background: #0006; }
+.msg audio.media { width: 240px; max-width: 100%; height: 40px; }
+.msg .file-save { color: var(--text); font-size: 13px; text-decoration: underline; justify-self: start; }
+.msg .file-save:only-child, .msg .file > a.file-save:first-child { font-size: 15px; text-decoration: none; }

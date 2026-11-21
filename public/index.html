@@ -100,9 +100,20 @@
       <ol id="messages" class="messages" aria-live="polite"></ol>
 
       <form id="composer" class="composer" autocomplete="off">
+        <button type="button" id="btn-attach" class="icon" title="Send a photo, video or file" aria-label="Send a photo, video or file" disabled>📎</button>
+        <input id="file-input" type="file" multiple hidden>
         <input id="msg-input" maxlength="4000" placeholder="Message" aria-label="Message" disabled>
+        <button type="button" id="btn-record" class="icon" title="Record a voice message" aria-label="Record a voice message" disabled>🎤</button>
         <button id="btn-send" class="primary" disabled>Send</button>
       </form>
+
+      <div id="recorder" class="recorder" hidden>
+        <span class="rec-dot" aria-hidden="true"></span>
+        <span class="rec-label">Recording</span>
+        <time id="rec-time">0:00</time>
+        <button type="button" id="btn-rec-cancel" class="ghost small">Cancel</button>
+        <button type="button" id="btn-rec-send" class="primary small">Send</button>
+      </div>
     </section>
 
     <!-- End / error screen -->

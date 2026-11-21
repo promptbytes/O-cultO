@@ -5,7 +5,10 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
+// Calls are off by default; switch them on here so they stay tested.
+process.env.ENABLE_CALLS = '1';
 const { server, wss } = require('../server/server.js');
+const nodeCrypto = require('node:crypto');
 
 // Use a local Playwright if installed, else the global one (cloud sessions
 // come with it pre-installed). Without either, these tests are skipped.
@@ -231,6 +234,98 @@ test('voice call in a group of three: everyone hears everyone', SKIP, async () =
   await cy.waitForSelector('#btn-call-join:not([hidden])');
   await cy.click('#btn-call-join');
   for (const p of [ana, ben, cy]) await hearing(p, 2);
+});
+
+// A real 1x1 PNG.
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
+async function downloadedBytes(page, locator) {
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click(locator)]);
+  return require('node:fs').readFileSync(await dl.path());
+}
+
+test('files: photos show inline, other files download intact, and stay encrypted', SKIP, async () => {
+  const { alice, bob } = await privateChat();
+
+  // A photo appears inside the chat.
+  await alice.setInputFiles('#file-input', { name: 'dot.png', mimeType: 'image/png', buffer: PNG });
+  await bob.waitForFunction(() => {
+    const img = document.querySelector('.msg.them img.media');
+    return img && img.complete && img.naturalWidth === 1;
+  });
+  assert.deepStrictEqual(await downloadedBytes(bob, '.msg.them a.file-save'), PNG);
+
+  // A 3 MB file arrives byte for byte (many pieces).
+  const big = nodeCrypto.randomBytes(3 * 1024 * 1024 + 123);
+  await alice.setInputFiles('#file-input', { name: 'archive.bin', mimeType: 'application/octet-stream', buffer: big });
+  const link = bob.locator('.msg.them a.file-save', { hasText: 'archive.bin' });
+  await link.waitFor({ timeout: 60000 });
+  const got = await downloadedBytes(bob, '.msg.them a.file-save:has-text("archive.bin")');
+  assert.strictEqual(nodeCrypto.createHash('sha256').update(got).digest('hex'),
+    nodeCrypto.createHash('sha256').update(big).digest('hex'));
+
+  // An HTML file is never shown inside the page, only offered as a download.
+  const secret = 'TOP-SECRET-PLAN-' + nodeCrypto.randomBytes(6).toString('hex');
+  await alice.setInputFiles('#file-input', { name: 'page.html', mimeType: 'text/html', buffer: Buffer.from(`<script>alert(1)</script>${secret}`) });
+  await bob.locator('.msg.them a.file-save', { hasText: 'page.html' }).waitFor();
+  assert.strictEqual(await bob.locator('iframe, .msg.them object, .msg.them embed').count(), 0);
+
+  // The server never saw the file contents.
+  const wire = seenByServer.join('\n');
+  assert.ok(!wire.includes(secret));
+  assert.ok(!wire.includes(Buffer.from(secret).toString('base64').slice(0, 16)));
+  assert.ok(!wire.includes('archive.bin'), 'file names are encrypted too');
+
+  // Too-big files are refused before anything is sent.
+  await alice.setInputFiles('#file-input', { name: 'huge.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(26 * 1024 * 1024, 1) });
+  await alice.waitForSelector('.msg.me .file.failed:has-text("too big")');
+});
+
+test('voice messages: record in the app and play on the other side', SKIP, async () => {
+  const { alice, bob } = await privateChat();
+  await alice.click('#btn-record');
+  await alice.waitForSelector('#recorder:not([hidden])');
+  await alice.waitForSelector('#rec-time:text("0:01")', { timeout: 5000 });
+  await alice.click('#btn-rec-send');
+  await alice.waitForSelector('#composer:not([hidden])');
+
+  await bob.waitForSelector('.msg.them audio.media', { timeout: 20000 });
+  assert.match(await bob.textContent('.msg.them'), /Voice message · 0:0[1-3]/);
+  const ok = await bob.waitForFunction(() => {
+    const a = document.querySelector('.msg.them audio.media');
+    return a && a.src.startsWith('blob:') && a.readyState >= 1 && a.duration > 0.5;
+  }, null, { timeout: 15000 });
+  assert.ok(ok);
+  // The sender sees their own voice message too.
+  await alice.waitForSelector('.msg.me audio.media');
+
+  // Cancelling sends nothing.
+  await alice.click('#btn-record');
+  await alice.waitForSelector('#recorder:not([hidden])');
+  await alice.click('#btn-rec-cancel');
+  await alice.waitForSelector('#composer:not([hidden])');
+  await bob.waitForTimeout(500);
+  assert.strictEqual(await bob.locator('.msg.them audio.media').count(), 1);
+});
+
+test('files in a group reach everyone with the sender name', SKIP, async () => {
+  const ana = await person();
+  await ana.goto(base);
+  await ana.click('#btn-new-group');
+  await ana.fill('#name-input', 'Ana');
+  await ana.click('#name-form button');
+  const link = await ana.inputValue('#group-link');
+  const ben = await person();
+  const cy = await person();
+  await joinGroup(ben, link, 'Ben');
+  await joinGroup(cy, link, 'Cy');
+  for (const p of [ana, ben, cy]) await p.waitForSelector('#conn-status:text("3 people")');
+
+  await ben.setInputFiles('#file-input', { name: 'dot.png', mimeType: 'image/png', buffer: PNG });
+  for (const p of [ana, cy]) {
+    await p.waitForSelector('.msg.them img.media');
+    assert.strictEqual(await p.textContent('.msg.them .sender'), 'Ben');
+  }
 });
 
 test('a used link cannot be opened by a third person', { skip: !chromium && 'playwright not available' }, async () => {

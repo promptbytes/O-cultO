@@ -1,8 +1,11 @@
 import {
-  newKeyPair, deriveSession, seal, open, randomId,
+  newKeyPair, deriveSession, seal, open, randomId, b64u, unb64u,
   newGroupSecret, deriveGroup, sealGroup, openGroup,
 } from './crypto.js';
 import { Calls } from './calls.js';
+import {
+  MAX_FILE_BYTES, CHUNK_BYTES, blobType, cleanFileName, fileBubble, formatDuration, VoiceRecorder,
+} from './media.js';
 
 // Everything about the chat lives in this one object, in memory only.
 // Nothing goes to localStorage, IndexedDB, cookies or the server.
@@ -19,17 +22,24 @@ function wsUrl() {
   return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
 }
 
-// STUN/TURN servers for calls come from the server operator (empty by default).
+// Server settings: whether voice calls are switched on, and the STUN/TURN
+// servers they use. Calls are off unless the operator turns them on.
 let iceServers = [];
+let callsEnabled = false;
 fetch('/config.json').then((r) => r.json()).then((c) => {
+  callsEnabled = c.calls === true;
   if (Array.isArray(c.iceServers)) iceServers = c.iceServers;
+  renderCall();
 }).catch(() => {});
 
 // ---------- lifecycle ----------
 
 function wipe() {
+  if (recorder.active) recorder.stop(false);
+  showRecorder(false);
   if (state) {
     state.calls?.hangup({ silent: true });
+    for (const url of state.urls) URL.revokeObjectURL(url);
     if (state.ws) {
       state.ws.onclose = null;
       try { state.ws.close(); } catch {}
@@ -41,6 +51,9 @@ function wipe() {
   $('msg-input').value = '';
   $('msg-input').disabled = true;
   $('btn-send').disabled = true;
+  $('btn-attach').disabled = true;
+  $('btn-record').disabled = true;
+  $('file-input').value = '';
   $('safety-code').textContent = '—';
   for (const id of ['verify-panel', 'group-invite-panel', 'call-bar']) $(id).hidden = true;
   for (const id of ['invite-link', 'group-link']) $(id).value = '';
@@ -65,6 +78,9 @@ function newState(extra) {
     name: '',
     sendChain: Promise.resolve(),
     recvChain: Promise.resolve(),
+    fileChain: Promise.resolve(), // outgoing files go one at a time
+    incoming: new Map(), // "<from>:<id>" -> file being received
+    urls: [], // in-memory file links, revoked on wipe
     ...extra,
   };
   const s = state;
@@ -226,6 +242,9 @@ async function handleServer(msg) {
 
   if (msg.type === 'peer-left') {
     s.peers.delete(msg.id);
+    for (const [key, t] of s.incoming) {
+      if (t.from === msg.id) { t.ui.fail('the sender left before it arrived'); s.incoming.delete(key); }
+    }
     s.calls.peerLeft(msg.id);
     if (s.mode === 'pair') {
       if (s.session) return end('Chat ended', 'The other person left. Every message has been wiped from this device.');
@@ -301,6 +320,12 @@ async function handlePeer(from, env) {
       }
       return;
 
+    case 'file-start':
+    case 'file-chunk':
+    case 'file-end':
+    case 'file-cancel':
+      return receiveFile(from, sid, body);
+
     case 'bye':
       if (s.mode === 'pair') end('Chat ended', 'The other person ended the chat. Every message has been wiped from this device.');
       return;
@@ -330,12 +355,11 @@ function openChatView() {
 
 function ready() {
   state.ready = true;
-  $('msg-input').disabled = false;
-  $('btn-send').disabled = false;
+  for (const id of ['msg-input', 'btn-send', 'btn-attach', 'btn-record']) $(id).disabled = false;
   $('msg-input').focus();
   addNote(state.mode === 'group'
-    ? 'Messages and calls in this group are end-to-end encrypted and are not saved anywhere.'
-    : 'Messages and calls are end-to-end encrypted and are not saved anywhere. Tap Verify to check that no one is listening in.');
+    ? 'Messages and files in this group are end-to-end encrypted and are not saved anywhere.'
+    : 'Messages and files are end-to-end encrypted and are not saved anywhere. Tap Verify to check that no one is listening in.');
   renderPeople();
   renderCall();
 }
@@ -360,8 +384,9 @@ function setConn(text, ok) {
 function renderCall() {
   const s = state;
   const bar = $('call-bar');
-  if (!s || !s.ready) {
+  if (!s || !s.ready || !callsEnabled) {
     bar.hidden = true;
+    $('btn-call').hidden = !callsEnabled;
     $('btn-call').disabled = true;
     return;
   }
@@ -407,23 +432,170 @@ async function startCall() {
   }
 }
 
-function addMessage(text, who, sender) {
+/** A chat bubble with an optional sender name and a time. */
+function bubble(who, sender) {
   const li = document.createElement('li');
   li.className = 'msg ' + who;
+  const time = document.createElement('time');
+  time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  li.append(time);
   if (sender) {
     const b = document.createElement('b');
     b.className = 'sender';
     b.textContent = sender;
-    li.append(b);
+    li.prepend(b);
   }
-  const p = document.createElement('span');
-  p.textContent = text; // textContent, never innerHTML
-  li.append(p);
-  const time = document.createElement('time');
-  time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  li.append(time);
   $('messages').append(li);
   li.scrollIntoView({ block: 'end' });
+  return li;
+}
+
+function addMessage(text, who, sender) {
+  const li = bubble(who, sender);
+  const p = document.createElement('span');
+  p.textContent = text; // textContent, never innerHTML
+  li.insertBefore(p, li.querySelector('time'));
+}
+
+// ---------- files, media and voice messages ----------
+
+const MAX_INCOMING_BYTES = 100 * 1024 * 1024; // in memory at once, all senders
+const MAX_INCOMING_PER_SENDER = 4;
+
+/** Place a file bubble's content above its time stamp. */
+function fileUi(li, meta) {
+  const ui = fileBubble(li, meta, (url) => state?.urls.push(url));
+  const box = li.querySelector('.file');
+  li.insertBefore(box, li.querySelector('time'));
+  return ui;
+}
+
+/** Wait until the connection has room, so big files don't flood it. */
+async function waitForRoom(s) {
+  await new Promise((r) => setTimeout(r, 30));
+  while (state === s && s.ws.readyState === WebSocket.OPEN && s.ws.bufferedAmount > 512 * 1024) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/** Queue a file or recording to send. */
+function sendFile(blob, { name, voice = false, duration = 0 } = {}) {
+  const s = state;
+  if (!s?.ready) return;
+  const meta = { name: cleanFileName(name || blob.name), size: blob.size, mime: blobType(blob.type), voice, duration };
+  const ui = fileUi(bubble('me'), meta);
+  if (blob.size === 0) return ui.fail('the file is empty');
+  if (blob.size > MAX_FILE_BYTES) return ui.fail('too big to send (the limit is 25 MB)');
+
+  s.fileChain = s.fileChain.then(async () => {
+    if (state !== s) return;
+    const id = randomId(9);
+    const chunks = Math.ceil(blob.size / CHUNK_BYTES);
+    sendBody({ t: 'file-start', id, chunks, ...meta, duration: Math.round(duration) });
+    for (let i = 0; i < chunks; i++) {
+      await waitForRoom(s);
+      if (state !== s) return;
+      const piece = new Uint8Array(await blob.slice(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES).arrayBuffer());
+      await sendBody({ t: 'file-chunk', id, i, data: b64u(piece) });
+      ui.progress((i + 1) / chunks);
+    }
+    await sendBody({ t: 'file-end', id });
+    if (state === s) ui.done(new Blob([blob], { type: meta.mime }));
+  }).catch(() => ui.fail('could not be sent'));
+}
+
+function receiveFile(from, sid, body) {
+  const s = state;
+  const key = `${from}:${body.id}`;
+  const t = s.incoming.get(key);
+
+  if (body.t === 'file-start') {
+    if (typeof body.id !== 'string' || t) return;
+    const size = Number(body.size);
+    const chunks = Number(body.chunks);
+    const sender = s.mode === 'group' ? (s.names.get(sid) || 'Someone') : null;
+    const meta = {
+      name: cleanFileName(body.name),
+      size,
+      mime: blobType(body.mime),
+      voice: body.voice === true,
+      duration: Number(body.duration) || 0,
+    };
+    const ui = fileUi(bubble('them', sender), meta);
+    const inFlight = [...s.incoming.values()];
+    if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_FILE_BYTES
+        || chunks !== Math.ceil(size / CHUNK_BYTES)) {
+      return ui.fail('refused (not a valid file)');
+    }
+    if (inFlight.filter((x) => x.from === from).length >= MAX_INCOMING_PER_SENDER
+        || inFlight.reduce((n, x) => n + x.meta.size, 0) + size > MAX_INCOMING_BYTES) {
+      return ui.fail('refused (too many files at once)');
+    }
+    s.incoming.set(key, { from, meta, chunks, next: 0, received: 0, parts: [], ui });
+    return;
+  }
+
+  if (!t) return;
+
+  if (body.t === 'file-chunk') {
+    let piece;
+    try { piece = unb64u(String(body.data)); } catch { piece = null; }
+    // Pieces arrive in order (the channel enforces it); anything else is a fault.
+    if (!piece || body.i !== t.next || t.received + piece.length > t.meta.size
+        || (body.i < t.chunks - 1 && piece.length !== CHUNK_BYTES)) {
+      t.ui.fail('arrived damaged');
+      return s.incoming.delete(key);
+    }
+    t.parts.push(piece);
+    t.next++;
+    t.received += piece.length;
+    t.ui.progress(t.next / t.chunks);
+    return;
+  }
+
+  if (body.t === 'file-end') {
+    s.incoming.delete(key);
+    if (t.next !== t.chunks || t.received !== t.meta.size) return t.ui.fail('arrived incomplete');
+    return t.ui.done(new Blob(t.parts, { type: t.meta.mime }));
+  }
+
+  if (body.t === 'file-cancel') {
+    s.incoming.delete(key);
+    t.ui.fail('cancelled by the sender');
+  }
+}
+
+// Voice messages
+
+const recorder = new VoiceRecorder({
+  onTick: (sec) => { $('rec-time').textContent = formatDuration(sec); },
+  onAutoStop: () => finishRecording(true),
+});
+
+function showRecorder(on) {
+  $('recorder').hidden = !on;
+  $('composer').hidden = on;
+}
+
+async function startRecording() {
+  if (!state?.ready || recorder.active) return;
+  try {
+    await recorder.start();
+    showRecorder(true);
+  } catch {
+    addNote('Could not use your microphone. Check that this site is allowed to use it.');
+  }
+}
+
+async function finishRecording(send) {
+  const s = state;
+  showRecorder(false);
+  const result = await recorder.stop(send);
+  if (result && state === s) {
+    const ext = result.blob.type.includes('mp4') ? 'm4a' : result.blob.type.includes('ogg') ? 'ogg' : 'webm';
+    sendFile(result.blob, { name: `voice-message.${ext}`, voice: true, duration: result.duration });
+  }
+  $('msg-input').focus();
 }
 
 function addNote(text) {
@@ -508,6 +680,14 @@ $('btn-call-join').onclick = startCall;
 $('btn-mute').onclick = () => state?.calls.toggleMute();
 $('btn-hangup').onclick = () => state?.calls.hangup();
 $('composer').onsubmit = sendMessage;
+$('btn-attach').onclick = () => $('file-input').click();
+$('file-input').onchange = () => {
+  for (const file of $('file-input').files) sendFile(file);
+  $('file-input').value = '';
+};
+$('btn-record').onclick = startRecording;
+$('btn-rec-cancel').onclick = () => finishRecording(false);
+$('btn-rec-send').onclick = () => finishRecording(true);
 for (const btn of document.querySelectorAll('[data-copy]')) {
   btn.onclick = async () => {
     const input = $(btn.dataset.copy);

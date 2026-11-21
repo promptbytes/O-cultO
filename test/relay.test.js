@@ -106,7 +106,8 @@ test('rejects bad room ids', async () => {
 
 test('serves call config and strict security headers', async () => {
   const res = await fetch(base + '/config.json');
-  assert.deepStrictEqual(await res.json(), { iceServers: [] });
+  // Calls are switched off unless the operator turns them on.
+  assert.deepStrictEqual(await res.json(), { calls: false, iceServers: [] });
   const page = await fetch(base + '/');
   assert.match(page.headers.get('content-security-policy'), /script-src 'self'/);
   assert.match(page.headers.get('permissions-policy'), /microphone=\(self\)/);

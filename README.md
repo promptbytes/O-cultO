@@ -4,13 +4,15 @@ This repo was created with in the name of privacy. i think some of us are a bit 
 
 ## What it does
 
-O-cultO is a private chat app that runs in any modern browser, on a phone or a computer. It does one-to-one chats, group chats of up to 8 people, and voice calls in both.
+O-cultO is a private chat app that runs in any modern browser, on a phone or a computer. It does one-to-one chats and group chats of up to 8 people, with text, photos, videos, files and voice messages.
 
 - **End-to-end encrypted.** Messages are encrypted on your device and can only be read on the other person's device.
 - **Nothing is stored.** Messages exist only in the memory of the two open browser tabs. The server writes nothing to disk and keeps no history. The browser writes nothing to local storage, cookies or IndexedDB. Close the tab and the chat is gone.
 - **No accounts.** No phone number, email or username. You start a chat, let one person scan the QR code (or send them the invite link), and talk.
 - **Group chats.** Up to 8 people. Everyone sees how many people are connected, so no one can listen in unseen.
-- **Voice calls.** In private and group chats. Audio goes straight between devices, encrypted, and the call set-up travels through the encrypted chat.
+- **Photos, videos and files.** Up to 25 MB each. Photos, videos and audio play in the chat; other files are offered as a download. Each file is encrypted in pieces and lives only in memory, so it's gone when the chat ends unless you tap Save.
+- **Voice messages.** Tap 🎤 to record in the app (up to 5 minutes), then Send or Cancel.
+- **Voice calls (off by default).** Built in, but switched off because without a STUN/TURN server they rarely connect between different networks. Turn on with `ENABLE_CALLS=1`.
 - **Share by QR code.** The QR code is drawn on your own device. Nothing about it is sent anywhere.
 - **Verify.** Both people see a 30-digit safety code. If the codes match when you compare them in person or on a call, no one is in the middle.
 
@@ -40,6 +42,7 @@ docker compose --profile turn up -d     # ... plus the call helper
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT` | `8080` | Port to listen on |
+| `ENABLE_CALLS` | off | Set to `1` to show voice calls |
 | `ICE_SERVERS` | `[]` | JSON list of STUN/TURN servers for calls. Empty means no third party learns anyone's IP, but calls only connect when both networks allow a direct connection. |
 
 ## How it works
@@ -59,6 +62,7 @@ docker compose --profile turn up -d     # ... plus the call helper
 - New keys are made for each chat and cannot be exported. When the chat ends they are destroyed, so old chats cannot be decrypted later (forward secrecy per chat).
 - Each message has a random IV and a counter bound into the encryption, so replayed, reordered or tampered messages are rejected.
 - **Groups** use a random 256-bit secret that travels only in the link's `#` part or the QR code. Each person's messages carry a random sender id and a counter, bound into the encryption.
+- **Files** are split into 96 KB pieces. Each piece is encrypted like a message (so it can't be read, changed, reordered or replayed), sent in order, and checked for completeness on arrival. Only photo, video and audio types are shown inside the chat; anything else, including HTML and SVG, is offered as a download only, so a file can never run code in the app.
 - **Calls** use WebRTC, which always encrypts audio (DTLS-SRTP). The offers, answers and network candidates are sent through the end-to-end encrypted chat, so the relay can't read or swap them. Groups connect everyone to everyone (a mesh).
 - The relay holds at most two people per private room and eight per group, keeps rooms only in memory, deletes a room once it is empty, and logs nothing.
 
@@ -68,6 +72,8 @@ Code: `server/server.js` (relay), `public/crypto.js` (encryption), `public/calls
 
 - **Both people must be online at the same time.** With nothing stored, there is nowhere to hold a message for someone who is offline.
 - **The relay can see metadata:** that two IP addresses are connected and when, and the size of messages. It cannot read the content. Using Tor or a VPN hides your IP from it.
+- **Files go through the relay** (encrypted), so the relay sees roughly how big a file is. Both people must still be online while it sends.
+- **Saved files are yours to look after.** Once you tap Save, the file is on your device like any other download.
 - **A group link is the group's key.** Anyone who gets it can join and read, and it keeps working for as long as anyone holds it. Show the QR code in person where you can, and start a new group if a link leaks. Group members can't cryptographically prove to each other who sent a message; names are what people say they are.
 - **Calls need a path between devices.** Without a STUN/TURN server some networks (many mobile carriers, strict office Wi-Fi) can't connect a call. Running your own coturn (in `deploy/`) fixes this without trusting anyone else. When a call does go through TURN, the TURN server sees IP addresses but not the audio.
 - **Compare the safety code.** Without that check, whoever runs the relay could in theory swap B's key (a man-in-the-middle attack). Checking the code defeats this.

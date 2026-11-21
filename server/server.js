@@ -21,8 +21,16 @@ const PORT = Number(process.env.PORT) || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-const MAX_FRAME_BYTES = 64 * 1024; // one encrypted message or call offer
-const MAX_MSGS_PER_10S = 200; // per-connection flood limit (calls send bursts)
+const MAX_FRAME_BYTES = 256 * 1024; // one encrypted message or file piece
+const MAX_MSGS_PER_10S = 400; // per-connection flood limits
+const MAX_BYTES_PER_10S = 64 * 1024 * 1024;
+// A receiver this far behind is dropped, so a slow or stalled connection
+// can't make the server hold a pile of data in memory.
+const MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
+
+// Voice calls are off unless ENABLE_CALLS=1. Without STUN/TURN servers they
+// rarely connect between different networks, so they're hidden by default.
+const CALLS_ENABLED = process.env.ENABLE_CALLS === '1';
 const ROOM_ID_RE = /^[A-Za-z0-9_-]{22,64}$/;
 const CAPACITY = { pair: 2, group: 8 };
 
@@ -65,7 +73,7 @@ function securityHeaders(req) {
       "default-src 'none'",
       "script-src 'self'",
       "style-src 'self'",
-      "img-src 'self' data:",
+      "img-src 'self' data: blob:",
       "media-src 'self' blob:",
       host ? `connect-src 'self' ws://${host} wss://${host}` : "connect-src 'self'",
       "base-uri 'none'",
@@ -98,7 +106,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/config.json') {
     res.writeHead(200, { ...securityHeaders(req), 'Content-Type': MIME['.json'] });
-    return res.end(JSON.stringify({ iceServers: ICE_SERVERS }));
+    return res.end(JSON.stringify({ calls: CALLS_ENABLED, iceServers: CALLS_ENABLED ? ICE_SERVERS : [] }));
   }
 
   const file = url.pathname === '/' ? '/index.html' : url.pathname;
@@ -123,7 +131,9 @@ const rooms = new Map();
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_FRAME_BYTES });
 
 function send(ws, obj) {
-  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+  if (ws.readyState !== ws.OPEN) return;
+  if (ws.bufferedAmount > MAX_BUFFERED_BYTES) return ws.terminate();
+  ws.send(JSON.stringify(obj));
 }
 
 function leave(ws) {
@@ -141,14 +151,17 @@ wss.on('connection', (ws) => {
   // A random id for this connection only, so people in a room can address
   // each other. It says nothing about who anyone is.
   ws.peerId = crypto.randomBytes(9).toString('base64url');
-  ws.window = { start: Date.now(), count: 0 };
+  ws.window = { start: Date.now(), count: 0, bytes: 0 };
 
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw, isBinary) => {
     const now = Date.now();
-    if (now - ws.window.start > 10_000) ws.window = { start: now, count: 0 };
-    if (++ws.window.count > MAX_MSGS_PER_10S) return ws.close(1008, 'rate limit');
+    if (now - ws.window.start > 10_000) ws.window = { start: now, count: 0, bytes: 0 };
+    ws.window.bytes += raw.length;
+    if (++ws.window.count > MAX_MSGS_PER_10S || ws.window.bytes > MAX_BYTES_PER_10S) {
+      return ws.close(1008, 'rate limit');
+    }
     if (isBinary) return ws.close(1003, 'text only');
 
     let msg;
