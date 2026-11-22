@@ -8,14 +8,21 @@ import {
 } from './media.js';
 
 // Everything about the chat lives in this one object, in memory.
-// Messages and files are never stored anywhere. To survive the phone pausing
-// or reloading the page while you switch apps, the chat's keys and settings
-// (not messages) are kept in this tab's sessionStorage until the chat ends;
-// the browser clears it when the tab is closed. Nothing goes to localStorage,
-// IndexedDB, cookies or the server.
+// Messages and files are never stored anywhere.
+//
+// Phones pause a page when you switch apps, and home-screen apps are often
+// shut down completely and restarted when you come back. So that a chat (or
+// an invite link you are sharing) survives that, the chat's keys and settings
+// (never messages) are kept in localStorage for at most 10 minutes after the
+// app was last running. Tapping End, or the 10 minutes passing, deletes them.
+// Each chat is locked to the page that owns it (Web Locks), so a second tab
+// never takes over a chat that is still open somewhere else.
 let state = null;
 
-const STORE_KEY = 'oculto.chat.v1';
+const STORE_PREFIX = 'oculto.chat.';
+const TAB_KEY = 'oculto.tab'; // which saved chat this tab owns (sessionStorage)
+const LOCK_PREFIX = 'oculto-chat-';
+const RESTORE_WITHIN_MS = 10 * 60 * 1000; // a closed app can pick its chat up this long after
 const PEER_GRACE_MS = 10 * 60 * 1000; // how long to wait for someone to come back
 const STALE_AFTER_HIDDEN_MS = 10 * 1000; // reconnect if the page slept this long
 
@@ -33,7 +40,9 @@ document.addEventListener('touchmove', (e) => {
 const views = ['home', 'name', 'invite', 'chat', 'ended'];
 
 function show(name) {
+  currentView = name;
   for (const v of views) $('view-' + v).hidden = v !== name;
+  if (name === 'home') applyUpdateIfIdle();
 }
 
 function wsUrl() {
@@ -44,11 +53,35 @@ function wsUrl() {
 // servers they use. Calls are off unless the operator turns them on.
 let iceServers = [];
 let callsEnabled = false;
-fetch('/config.json').then((r) => r.json()).then((c) => {
-  callsEnabled = c.calls === true;
-  if (Array.isArray(c.iceServers)) iceServers = c.iceServers;
-  renderCall();
-}).catch(() => {});
+
+// Version check. A home-screen app can keep running an old page for a long
+// time; when the server has a newer one, reload into it as soon as no chat
+// is open (never in the middle of one).
+let build = null;
+let updatePending = false;
+let currentView = null;
+
+async function checkForUpdate() {
+  try {
+    const c = await (await fetch('/config.json', { cache: 'no-store' })).json();
+    if (!build) {
+      build = c.build || '';
+      callsEnabled = c.calls === true;
+      if (Array.isArray(c.iceServers)) iceServers = c.iceServers;
+      $('version').textContent = build ? `Version ${build.slice(0, 7)}` : '';
+      renderCall();
+    } else if (c.build && c.build !== build) {
+      updatePending = true;
+      applyUpdateIfIdle();
+    }
+  } catch {}
+}
+
+function applyUpdateIfIdle() {
+  if (updatePending && !state && (currentView === 'home' || currentView === 'ended')) location.reload();
+}
+
+checkForUpdate();
 
 // ---------- lifecycle ----------
 
@@ -116,9 +149,14 @@ function newState(extra) {
     retries: 0,
     knownSids: new Set(), // group senders we've seen (to say "is back")
     leftBy: new Set(), // group members who left on purpose
+    releaseLock: null,
     ...extra,
   };
   const s = state;
+  if (!s.chatId) {
+    s.chatId = randomId(12);
+    holdLock(s);
+  }
   s.calls = new Calls({
     myId: () => s.myId,
     sendTo: (id, body) => sendBody(body, id),
@@ -136,7 +174,7 @@ function newState(extra) {
 function save() {
   const s = state;
   if (!s || s.closing) return;
-  const snap = { v: 1, mode: s.mode, room: s.room, resume: s.resume, ready: s.ready };
+  const snap = { v: 2, id: s.chatId, at: Date.now(), mode: s.mode, room: s.room, resume: s.resume, ready: s.ready };
   if (s.mode === 'pair') {
     Object.assign(snap, {
       role: s.role, jwk: s.keys.jwk, pub: s.keys.pub, peerPub: s.peerPub || null,
@@ -148,25 +186,86 @@ function save() {
       send: s.group.sendCounter, recv: Object.fromEntries(s.group.lastRecv),
     });
   }
-  try { sessionStorage.setItem(STORE_KEY, JSON.stringify(snap)); } catch {}
-}
-
-function forget() {
-  try { sessionStorage.removeItem(STORE_KEY); } catch {}
-}
-
-function loadSaved() {
   try {
-    const snap = JSON.parse(sessionStorage.getItem(STORE_KEY));
-    return snap && snap.v === 1 ? snap : null;
-  } catch { return null; }
+    localStorage.setItem(STORE_PREFIX + s.chatId, JSON.stringify(snap));
+    sessionStorage.setItem(TAB_KEY, s.chatId);
+  } catch {}
 }
 
-/** Pick a chat back up after the phone reloaded the page. */
-async function restore(snap) {
+// Keep "last running" fresh while the app is open. A paused or closed app
+// stops updating it, which is what starts the 10-minute clock.
+setInterval(save, 30 * 1000);
+
+/** Delete this chat's saved keys and let go of its lock. */
+function forget() {
+  const s = state;
+  try {
+    if (s?.chatId) localStorage.removeItem(STORE_PREFIX + s.chatId);
+    sessionStorage.removeItem(TAB_KEY);
+  } catch {}
+  if (s?.releaseLock) {
+    s.releaseLock();
+    s.releaseLock = null;
+  }
+}
+
+/**
+ * Hold a chat's lock for as long as this page lives, so no other tab picks
+ * the same chat up. Resolves to whether we got it.
+ */
+function holdLock(holder, waitMs = 0) {
+  if (!navigator.locks?.request) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const ctrl = new AbortController();
+    const timer = waitMs ? setTimeout(() => ctrl.abort(), waitMs) : null;
+    const opts = waitMs ? { signal: ctrl.signal } : { ifAvailable: true };
+    navigator.locks.request(LOCK_PREFIX + holder.chatId, opts, (lock) => {
+      clearTimeout(timer);
+      if (!lock) return resolve(false);
+      return new Promise((release) => {
+        holder.releaseLock = release;
+        resolve(true);
+      });
+    }).catch(() => resolve(false));
+  });
+}
+
+/**
+ * Find a saved chat to pick back up: this tab's own if it has one, else the
+ * most recent one no open page is using. Expired ones are deleted.
+ */
+async function pickSaved() {
+  const now = Date.now();
+  const found = [];
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (!key.startsWith(STORE_PREFIX)) continue;
+      let snap = null;
+      try { snap = JSON.parse(localStorage.getItem(key)); } catch {}
+      if (!snap || snap.v !== 2 || typeof snap.at !== 'number' || now - snap.at > RESTORE_WITHIN_MS) {
+        localStorage.removeItem(key);
+      } else {
+        found.push(snap);
+      }
+    }
+  } catch { return null; }
+  let mine = null;
+  try { mine = sessionStorage.getItem(TAB_KEY); } catch {}
+  found.sort((a, b) => (b.id === mine) - (a.id === mine) || b.at - a.at);
+  for (const snap of found) {
+    const holder = { chatId: snap.id };
+    // Our own chat's lock may still be held by the page we're replacing.
+    if (await holdLock(holder, snap.id === mine ? 3000 : 0)) return { snap, releaseLock: holder.releaseLock };
+  }
+  return null;
+}
+
+/** Pick a chat back up after the phone reloaded or restarted the app. */
+async function restore({ snap, releaseLock }) {
+  const own = { chatId: snap.id, releaseLock };
   if (snap.mode === 'pair') {
     const keys = await importKeyPair(snap.jwk, snap.pub);
-    newState({ mode: 'pair', role: snap.role, room: snap.room, keys, session: null, peerPub: snap.peerPub, resume: snap.resume });
+    newState({ ...own, mode: 'pair', role: snap.role, room: snap.room, keys, session: null, peerPub: snap.peerPub, resume: snap.resume });
     if (!snap.peerPub) {
       showInvite();
     } else {
@@ -184,7 +283,7 @@ async function restore(snap) {
     group.sid = snap.sid;
     group.sendCounter = snap.send;
     group.lastRecv = new Map(Object.entries(snap.recv || {}));
-    newState({ mode: 'group', room: snap.room, secret: snap.secret, group, name: snap.name, resume: snap.resume, creating: snap.creating });
+    newState({ ...own, mode: 'group', room: snap.room, secret: snap.secret, group, name: snap.name, resume: snap.resume, creating: snap.creating });
     showGroupLink();
     openChatView();
     ready({ restored: true });
@@ -265,6 +364,8 @@ document.addEventListener('visibilitychange', () => {
     stopTyping();
   } else {
     wakeUp(hiddenAt && Date.now() - hiddenAt > STALE_AFTER_HIDDEN_MS);
+    save();
+    checkForUpdate();
   }
 });
 addEventListener('pageshow', (e) => { if (e.persisted) wakeUp(true); });
@@ -577,7 +678,7 @@ function ready({ restored = false } = {}) {
   $('msg-input').disabled = false;
   $('msg-input').focus();
   if (restored) {
-    addNote('Welcome back. The page was reloaded, so earlier messages are gone (they are never saved). The chat carries on.');
+    addNote('Welcome back. The app was restarted, so earlier messages are gone (they are never saved). The chat carries on.');
   } else {
     addNote(state.mode === 'group'
       ? 'Messages and files in this group are end-to-end encrypted and are not saved anywhere.'
@@ -1037,17 +1138,20 @@ for (const btn of document.querySelectorAll('[data-copy]')) {
 }
 
 // Wipe when the page is closed.
-// Closing the tab (or reloading it yourself) ends the chat. Switching to
-// another app does not: phones only pause the page then, and if one later
-// drops it from memory and reloads it, the session cache picks the chat up.
-addEventListener('pagehide', (e) => {
-  if (e.persisted) return; // kept in the back/forward cache; we reconnect on return
-  if (state?.ready) endChat(); else wipe();
+// Closing or reloading a browser tab on a computer ends the chat
+// ('beforeunload'). Switching apps on a phone never does: phones don't fire
+// that event then (and iPhones never fire it), so a paused or restarted app
+// picks its chat back up. A phone app that is really gone stops refreshing
+// its saved keys, and they expire 10 minutes later; the other person's chat
+// waits the same 10 minutes. Tap End to finish a chat at once.
+addEventListener('beforeunload', () => {
+  if (state?.ready) endChat();
+  else if (state) wipe();
 });
+addEventListener('pagehide', () => stopTyping());
 
 // Invite links: private /#r=<room>&k=<public key>, group /#g=<room>&s=<secret>
 const params = new URLSearchParams(location.hash.slice(1));
-const saved = loadSaved();
 if (params.get('r') || params.get('g')) {
   // Take the invite out of the address bar and browser history.
   history.replaceState(null, '', location.pathname);
@@ -1056,8 +1160,13 @@ if (params.get('r') && params.get('k')) {
   joinChat(params.get('r'), params.get('k'));
 } else if (params.get('g') && params.get('s')) {
   askName({ room: params.get('g'), secret: params.get('s'), creating: false });
-} else if (saved) {
-  restore(saved).catch(() => { wipe(); show('home'); });
 } else {
-  show('home');
+  pickSaved().then((found) => {
+    if (!found) return show('home');
+    return restore(found).catch(() => {
+      try { localStorage.removeItem(STORE_PREFIX + found.snap.id); } catch {}
+      wipe();
+      show('home');
+    });
+  });
 }

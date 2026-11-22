@@ -7,8 +7,9 @@ This repo was created with in the name of privacy. i think some of us are a bit 
 O-cultO is a private chat app that runs in any modern browser, on a phone or a computer. It does one-to-one chats and group chats of up to 8 people, with text, photos, videos, files and voice messages.
 
 - **End-to-end encrypted.** Messages are encrypted on your device and can only be read on the other person's device.
-- **Nothing is stored.** Messages and files exist only in the memory of the open browser tabs. The server writes nothing to disk and keeps no history. The browser writes nothing to local storage, cookies or IndexedDB. Close the tab (or tap End) and the chat is gone.
-- **Survives switching apps.** Phones pause a page when you switch to another app (say, to send the invite on WhatsApp) and sometimes reload it later. O-cultO reconnects by itself, and keeps the chat's keys (never messages) in the tab's `sessionStorage` until the chat ends, so the link and the chat keep working. If the other person drops off, the chat waits up to 10 minutes for them to come back; if they tap End or close their tab, it ends straight away.
+- **Nothing is stored.** Messages and files exist only in the memory of the open app. The server writes nothing to disk and keeps no history. No cookies. Tap End and the chat is gone.
+- **Survives switching apps.** Phones pause a page when you switch to another app (say, to send the invite on WhatsApp), and home-screen apps are often shut down and restarted. O-cultO reconnects by itself and keeps the chat's keys (never messages) in `localStorage`, so the link and the chat keep working when you come back. Those keys are deleted when you tap End, or 10 minutes after the app was last running. If the other person drops off, the chat waits up to 10 minutes for them. Closing a browser tab on a computer ends the chat straight away.
+- **Updates itself.** When a new version is out, the app reloads into it the next time you're on the start screen (never during a chat). The start screen shows the version.
 - **No accounts.** No phone number, email or username. You start a chat, let one person scan the QR code (or send them the invite link), and talk.
 - **Group chats.** Up to 8 people. Everyone sees how many people are connected, so no one can listen in unseen.
 - **Photos, videos and files.** Up to 25 MB each. Photos, videos and audio play in the chat; other files are offered as a download. Each file is encrypted in pieces and lives only in memory, so it's gone when the chat ends unless you tap Save.
@@ -72,7 +73,7 @@ Code: `server/server.js` (relay), `public/crypto.js` (encryption), `public/calls
 
 ## Honest limits
 
-- **The tab's session cache holds the chat keys while a chat is open.** That's what lets a chat survive the phone reloading the page. Messages are never in it. It is cleared when you tap End or close the tab, but some browsers bring closed tabs back with their session (for example "restore tabs" after a crash), so tap **End** when you're done to be sure.
+- **The chat's keys stay on the device for up to 10 minutes after the app stops running.** That's what lets a chat survive the phone shutting the app down while you're in another app. Messages are never stored. A phone can't tell the app "you were closed" apart from "you were paused", so swiping the app away doesn't end the chat at once: tap **End** when you're done.
 - **Messages sent while the other person is offline are not delivered.** The Send button is disabled while they're away, and anything in flight when a connection drops is lost.
 - **Both people must be online at the same time.** With nothing stored, there is nowhere to hold a message for someone who is offline.
 - **The relay can see metadata:** that two IP addresses are connected and when, and the size of messages. It cannot read the content. Using Tor or a VPN hides your IP from it.

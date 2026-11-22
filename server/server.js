@@ -97,6 +97,17 @@ const VENDOR = {
   '/vendor/qrcode.js': require.resolve('qrcode-generator/qrcode.js'),
 };
 
+// A short fingerprint of the app's files. Pages compare it with their own to
+// notice a newer version (home-screen apps can keep an old page for days).
+const BUILD = (() => {
+  const h = crypto.createHash('sha256');
+  const files = fs.readdirSync(PUBLIC_DIR).sort().map((f) => path.join(PUBLIC_DIR, f));
+  for (const f of [...files, ...Object.values(VENDOR)]) {
+    if (fs.statSync(f).isFile()) h.update(f).update(fs.readFileSync(f));
+  }
+  return h.digest('hex').slice(0, 12);
+})();
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
 
@@ -106,7 +117,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/config.json') {
     res.writeHead(200, { ...securityHeaders(req), 'Content-Type': MIME['.json'] });
-    return res.end(JSON.stringify({ calls: CALLS_ENABLED, iceServers: CALLS_ENABLED ? ICE_SERVERS : [] }));
+    return res.end(JSON.stringify({ build: BUILD, calls: CALLS_ENABLED, iceServers: CALLS_ENABLED ? ICE_SERVERS : [] }));
   }
 
   const file = url.pathname === '/' ? '/index.html' : url.pathname;

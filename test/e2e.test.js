@@ -113,25 +113,28 @@ test('two people chat end to end, and the server only sees ciphertext', { skip: 
   assert.ok(!wire.includes('old oak'), 'server must never see plaintext');
   assert.ok(!wire.includes('see you there'), 'server must never see plaintext');
 
-  // Messages are never written to browser storage. Only the chat's keys sit
-  // in this tab's session cache while the chat is open.
+  // Messages are never written to browser storage. Only the chat's keys are
+  // kept (so the chat survives the phone restarting the app), and no cookies.
   for (const p of [alice, bob]) {
     const store = await p.evaluate(() => ({
-      local: localStorage.length,
       cookies: document.cookie.length,
-      keys: Object.keys(sessionStorage),
-      text: JSON.stringify(sessionStorage),
+      local: Object.keys(localStorage),
+      session: Object.keys(sessionStorage),
+      text: JSON.stringify(localStorage) + JSON.stringify(sessionStorage),
     }));
-    assert.strictEqual(store.local, 0);
     assert.strictEqual(store.cookies, 0);
-    assert.deepStrictEqual(store.keys, ['oculto.chat.v1']);
+    assert.strictEqual(store.local.length, 1);
+    assert.match(store.local[0], /^oculto\.chat\.[\w-]+$/);
+    assert.deepStrictEqual(store.session, ['oculto.tab']);
     assert.ok(!store.text.includes('old oak') && !store.text.includes('see you there'), 'no message text in storage');
   }
 
   // Ending wipes both sides, including the session cache.
   await alice.click('#btn-end');
   await bob.waitForSelector('#view-ended:not([hidden])');
-  for (const p of [alice, bob]) assert.strictEqual(await p.evaluate(() => sessionStorage.length), 0);
+  for (const p of [alice, bob]) {
+    assert.strictEqual(await p.evaluate(() => localStorage.length + sessionStorage.length), 0);
+  }
   assert.strictEqual(await bob.locator('.msg').count(), 0);
   assert.strictEqual(await alice.locator('.msg').count(), 0);
 });
@@ -418,12 +421,12 @@ async function silentReload(page) {
 }
 
 /** A person whose page never hears that it is being unloaded (see silentReload). */
-async function personWhosePhoneDiscardsPages() {
-  const ctx = await browser.newContext({ permissions: ['microphone'] });
+async function personWhosePhoneDiscardsPages(ctx) {
+  ctx = ctx || await browser.newContext({ permissions: ['microphone'] });
   await ctx.addInitScript(() => {
     const add = window.addEventListener;
     window.addEventListener = function (type, ...rest) {
-      if (type === 'pagehide') return undefined;
+      if (type === 'pagehide' || type === 'beforeunload') return undefined;
       return add.call(this, type, ...rest);
     };
   });
@@ -470,6 +473,133 @@ test('an invite link keeps working even if the phone reloads the page meanwhile'
   await alice.fill('#msg-input', 'it still works');
   await alice.press('#msg-input', 'Enter');
   await bob.waitForSelector('.msg.them:has-text("it still works")');
+});
+
+// ---- home-screen apps: the phone shuts the app down and restarts it ----
+
+/**
+ * Like an iPhone home-screen app being shut down while you're in WhatsApp:
+ * the page is gone without any warning, and opening the app again starts a
+ * fresh page (same storage, new tab session).
+ */
+async function restartApp(page) {
+  const ctx = page.context();
+  await page.close({ runBeforeUnload: false });
+  const fresh = await personWhosePhoneDiscardsPages(ctx);
+  await fresh.goto(base);
+  return fresh;
+}
+
+test('home-screen app: sharing the link survives the app being restarted', SKIP, async () => {
+  let alice = await personWhosePhoneDiscardsPages();
+  const bob = await person();
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  const link = await alice.inputValue('#invite-link');
+  await alice.waitForSelector('#invite-status:text("Waiting for them")');
+
+  // Alice switches to WhatsApp; the phone shuts the app down. She opens it again.
+  alice = await restartApp(alice);
+  await alice.waitForSelector('#view-invite:not([hidden])');
+  assert.strictEqual(await alice.inputValue('#invite-link'), link, 'the same link is back');
+  await alice.waitForSelector('#invite-status:text("Waiting for them")');
+
+  await bob.goto(link);
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted);
+  await bob.fill('#msg-input', 'got it on WhatsApp');
+  await bob.press('#msg-input', 'Enter');
+  await alice.waitForSelector('.msg.them:has-text("got it on WhatsApp")');
+});
+
+test('home-screen app: a chat survives the app being restarted', SKIP, async () => {
+  const alice = await person();
+  let bob = await personWhosePhoneDiscardsPages();
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  await bob.goto(await alice.inputValue('#invite-link'));
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted);
+
+  bob = await restartApp(bob);
+  await bob.waitForSelector('.note:has-text("Welcome back")');
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted, { timeout: 15000 });
+  await bob.fill('#msg-input', 'back from Gmail');
+  await bob.press('#msg-input', 'Enter');
+  await alice.waitForSelector('.msg.them:has-text("back from Gmail")');
+  await alice.fill('#msg-input', 'hi again');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("hi again")');
+});
+
+test('a second tab never takes over a chat that is open in another tab', SKIP, async () => {
+  const ctx = await browser.newContext();
+  const tab1 = await ctx.newPage();
+  await tab1.goto(base);
+  await tab1.click('#btn-new');
+  const link = await tab1.inputValue('#invite-link');
+  await tab1.waitForSelector('#invite-status:text("Waiting for them")');
+
+  const tab2 = await ctx.newPage();
+  await tab2.goto(base);
+  await tab2.waitForSelector('#view-home:not([hidden])');
+
+  const bob = await person();
+  await bob.goto(link);
+  await tab1.waitForSelector(encrypted);
+});
+
+test('a saved chat expires 10 minutes after the app was last running', SKIP, async () => {
+  let alice = await personWhosePhoneDiscardsPages();
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  await alice.waitForSelector('#invite-status:text("Waiting for them")');
+  const ctx = alice.context();
+  await alice.close({ runBeforeUnload: false });
+
+  // Pretend the app was last running 11 minutes ago.
+  const probe = await ctx.newPage();
+  await probe.route('**/*', (r) => r.fulfill({ body: '<html></html>', contentType: 'text/html' }));
+  await probe.goto(base + '/blank');
+  await probe.evaluate(() => {
+    for (const k of Object.keys(localStorage)) {
+      const snap = JSON.parse(localStorage.getItem(k));
+      snap.at -= 11 * 60 * 1000;
+      localStorage.setItem(k, JSON.stringify(snap));
+    }
+  });
+  await probe.close();
+
+  alice = await personWhosePhoneDiscardsPages(ctx);
+  await alice.goto(base);
+  await alice.waitForSelector('#view-home:not([hidden])');
+  assert.strictEqual(await alice.evaluate(() => localStorage.length), 0, 'expired keys are deleted');
+});
+
+test('the start screen shows which version is running', SKIP, async () => {
+  const page = await person();
+  await page.goto(base);
+  await page.waitForSelector('#version:text("Version ")');
+  assert.match(await page.textContent('#version'), /^Version [0-9a-f]{7}$/);
+});
+
+test('an old page updates itself when a new version is out, but never mid-chat', SKIP, async () => {
+  const page = await person();
+  await page.goto(base);
+  await page.waitForSelector('#version:text("Version ")');
+  const before = await page.textContent('#version');
+
+  // A chat is open: a new version must not interrupt it.
+  await page.click('#btn-new');
+  await page.waitForSelector('#invite-status:text("Waiting for them")');
+  const real = await (await fetch(base + '/config.json')).json();
+  await page.route('**/config.json', (r) => r.fulfill({ json: { ...real, build: 'ffffffffffff' } }));
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await page.waitForTimeout(800);
+  assert.ok(await page.isVisible('#view-invite'), 'still sharing the link');
+
+  // Back on the start screen, it reloads into the new version.
+  await page.click('#btn-cancel');
+  await page.waitForSelector('#version:text("Version fffffff")', { timeout: 5000 });
+  assert.notStrictEqual(before, await page.textContent('#version'));
 });
 
 test('a chat carries on when the other person briefly drops off', SKIP, async () => {
