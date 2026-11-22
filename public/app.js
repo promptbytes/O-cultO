@@ -1,5 +1,5 @@
 import {
-  newKeyPair, deriveSession, seal, open, randomId, b64u, unb64u,
+  newKeyPair, importKeyPair, deriveSession, seal, open, randomId, b64u, unb64u,
   newGroupSecret, deriveGroup, sealGroup, openGroup,
 } from './crypto.js';
 import { Calls } from './calls.js';
@@ -7,9 +7,17 @@ import {
   MAX_FILE_BYTES, CHUNK_BYTES, blobType, cleanFileName, fileBubble, formatDuration, VoiceRecorder,
 } from './media.js';
 
-// Everything about the chat lives in this one object, in memory only.
-// Nothing goes to localStorage, IndexedDB, cookies or the server.
+// Everything about the chat lives in this one object, in memory.
+// Messages and files are never stored anywhere. To survive the phone pausing
+// or reloading the page while you switch apps, the chat's keys and settings
+// (not messages) are kept in this tab's sessionStorage until the chat ends;
+// the browser clears it when the tab is closed. Nothing goes to localStorage,
+// IndexedDB, cookies or the server.
 let state = null;
+
+const STORE_KEY = 'oculto.chat.v1';
+const PEER_GRACE_MS = 10 * 60 * 1000; // how long to wait for someone to come back
+const STALE_AFTER_HIDDEN_MS = 10 * 1000; // reconnect if the page slept this long
 
 const $ = (id) => document.getElementById(id);
 
@@ -45,21 +53,23 @@ fetch('/config.json').then((r) => r.json()).then((c) => {
 // ---------- lifecycle ----------
 
 function wipe() {
+  forget();
   if (recorder.active) recorder.stop(false);
   showRecorder(false);
   if (state) {
+    state.closing = true;
     state.calls?.hangup({ silent: true });
     for (const url of state.urls) URL.revokeObjectURL(url);
+    clearTimeout(state.typingIdle);
+    clearTimeout(state.reconnectTimer);
+    clearTimeout(state.graceTimer);
+    for (const t of state.typers.values()) clearTimeout(t);
     if (state.ws) {
       state.ws.onclose = null;
       try { state.ws.close(); } catch {}
     }
   }
   state = null;
-  if (state) {
-    clearTimeout(state.typingIdle);
-    for (const t of state.typers.values()) clearTimeout(t);
-  }
   typingEl = null;
   $('messages').replaceChildren();
   $('call-audio').replaceChildren();
@@ -100,6 +110,12 @@ function newState(extra) {
     typingSentAt: 0,
     typingIdle: null,
     urls: [], // in-memory file links, revoked on wipe
+    online: false, // our connection has joined the room
+    peerHere: false, // private chat: the other person is connected
+    resume: null, // secret token that lets us rejoin after a drop
+    retries: 0,
+    knownSids: new Set(), // group senders we've seen (to say "is back")
+    leftBy: new Set(), // group members who left on purpose
     ...extra,
   };
   const s = state;
@@ -115,19 +131,167 @@ function newState(extra) {
   return s;
 }
 
+// ---------- session cache (survives the phone pausing or reloading the tab) ----------
+
+function save() {
+  const s = state;
+  if (!s || s.closing) return;
+  const snap = { v: 1, mode: s.mode, room: s.room, resume: s.resume, ready: s.ready };
+  if (s.mode === 'pair') {
+    Object.assign(snap, {
+      role: s.role, jwk: s.keys.jwk, pub: s.keys.pub, peerPub: s.peerPub || null,
+      send: s.session?.sendCounter ?? 0, recv: s.session?.lastRecv ?? -1,
+    });
+  } else {
+    Object.assign(snap, {
+      secret: s.secret, name: s.name, sid: s.group.sid, creating: !!s.creating,
+      send: s.group.sendCounter, recv: Object.fromEntries(s.group.lastRecv),
+    });
+  }
+  try { sessionStorage.setItem(STORE_KEY, JSON.stringify(snap)); } catch {}
+}
+
+function forget() {
+  try { sessionStorage.removeItem(STORE_KEY); } catch {}
+}
+
+function loadSaved() {
+  try {
+    const snap = JSON.parse(sessionStorage.getItem(STORE_KEY));
+    return snap && snap.v === 1 ? snap : null;
+  } catch { return null; }
+}
+
+/** Pick a chat back up after the phone reloaded the page. */
+async function restore(snap) {
+  if (snap.mode === 'pair') {
+    const keys = await importKeyPair(snap.jwk, snap.pub);
+    newState({ mode: 'pair', role: snap.role, room: snap.room, keys, session: null, peerPub: snap.peerPub, resume: snap.resume });
+    if (!snap.peerPub) {
+      showInvite();
+    } else {
+      state.session = await deriveSession({
+        privateKey: keys.privateKey, myPubRaw: keys.pubRaw, peerPub: snap.peerPub, role: snap.role, room: snap.room,
+      });
+      state.session.sendCounter = snap.send;
+      state.session.lastRecv = snap.recv;
+      openChatView();
+      if (snap.ready) ready({ restored: true });
+      else setConn('Connecting…', false);
+    }
+  } else {
+    const group = await deriveGroup({ secret: snap.secret, room: snap.room });
+    group.sid = snap.sid;
+    group.sendCounter = snap.send;
+    group.lastRecv = new Map(Object.entries(snap.recv || {}));
+    newState({ mode: 'group', room: snap.room, secret: snap.secret, group, name: snap.name, resume: snap.resume, creating: snap.creating });
+    showGroupLink();
+    openChatView();
+    ready({ restored: true });
+  }
+  save();
+  connect();
+}
+
+// ---------- connection (reconnects by itself) ----------
+
 function connect() {
   const s = state;
+  clearTimeout(s.reconnectTimer);
   const ws = new WebSocket(wsUrl());
   s.ws = ws;
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', room: s.room, mode: s.mode }));
+  ws.onopen = () => {
+    const join = { type: 'join', room: s.room, mode: s.mode };
+    if (s.resume) join.resume = s.resume;
+    ws.send(JSON.stringify(join));
+  };
   // Handle server events strictly in order: decryption is async, and calls
   // depend on offers arriving before their network candidates.
   ws.onmessage = (ev) => {
-    s.recvChain = s.recvChain.then(() => (state === s ? handleServer(JSON.parse(ev.data)) : null)).catch(() => {});
+    if (s.ws !== ws) return;
+    s.recvChain = s.recvChain.then(() => (state === s && s.ws === ws ? handleServer(JSON.parse(ev.data)) : null)).catch(() => {});
   };
   ws.onclose = () => {
-    if (state === s) end('Connection lost', 'The connection dropped, so the chat was wiped. Start a new one to keep talking.');
+    if (state === s && s.ws === ws) lostConnection(s);
   };
+}
+
+/** Our connection dropped (often: the phone paused the app). Keep the chat and retry. */
+function lostConnection(s, { now = false } = {}) {
+  s.online = false;
+  forgetPeers(s);
+  s.calls.hangup({ silent: true });
+  renderConnection();
+  const delay = now ? 0 : Math.min(15000, 1000 * 2 ** Math.min(s.retries, 4));
+  s.retries++;
+  clearTimeout(s.reconnectTimer);
+  s.reconnectTimer = setTimeout(() => { if (state === s) connect(); }, delay);
+}
+
+/** Everyone else is unknown until the server tells us again. */
+function forgetPeers(s) {
+  for (const id of s.peers) {
+    setTyping(id, false);
+    s.calls.peerLeft(id);
+  }
+  for (const [key, t] of s.incoming) {
+    t.ui.fail('the connection dropped before it arrived');
+    s.incoming.delete(key);
+  }
+  s.peers.clear();
+  s.members.clear();
+}
+
+/** Back in the app: reconnect at once, replacing a connection that may have died while asleep. */
+function wakeUp(force) {
+  const s = state;
+  if (!s || !s.ws) return;
+  const rs = s.ws.readyState;
+  if (rs === WebSocket.CLOSED || rs === WebSocket.CLOSING) {
+    lostConnection(s, { now: true });
+  } else if (force && rs === WebSocket.OPEN) {
+    const old = s.ws;
+    s.ws = null;
+    old.onclose = null;
+    try { old.close(); } catch {}
+    lostConnection(s, { now: true });
+  }
+}
+
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    hiddenAt = Date.now();
+    stopTyping();
+  } else {
+    wakeUp(hiddenAt && Date.now() - hiddenAt > STALE_AFTER_HIDDEN_MS);
+  }
+});
+addEventListener('pageshow', (e) => { if (e.persisted) wakeUp(true); });
+addEventListener('online', () => wakeUp(true));
+
+/** Private chat: the other person dropped off. Wait a while for them. */
+function peerAway() {
+  const s = state;
+  s.peerHere = false;
+  clearTimeout(s.graceTimer);
+  s.graceTimer = setTimeout(() => {
+    if (state === s) end('Chat ended', "The other person didn't come back, so the chat was closed and wiped from this device.");
+  }, PEER_GRACE_MS);
+  renderConnection();
+}
+
+function peerBack() {
+  const s = state;
+  s.peerHere = true;
+  clearTimeout(s.graceTimer);
+  renderConnection();
+}
+
+/** Can we send right now? */
+function canSend() {
+  const s = state;
+  return !!(s?.ready && s.online && (s.mode === 'group' || s.peerHere));
 }
 
 function relay(data, to) {
@@ -143,6 +307,7 @@ function sendBody(body, to) {
   s.sendChain = s.sendChain.then(async () => {
     if (state !== s) return;
     const data = s.mode === 'group' ? await sealGroup(s.group, body) : await seal(s.session, body);
+    save(); // remember the counter before sending, in case the page reloads
     relay(data, to);
   }).catch(() => {});
   return s.sendChain;
@@ -154,14 +319,19 @@ async function startChat() {
   wipe();
   const keys = await newKeyPair();
   newState({ mode: 'pair', role: 'a', room: randomId(), keys, session: null });
+  showInvite();
+  save();
+  connect();
+}
+
+function showInvite() {
   // The public key goes in the #fragment, which browsers never send to the
   // server, so person B gets A's real key straight from A.
-  const link = `${location.origin}/#r=${state.room}&k=${keys.pub}`;
+  const link = `${location.origin}/#r=${state.room}&k=${state.keys.pub}`;
   $('invite-link').value = link;
   drawQr($('invite-qr'), link);
-  $('invite-status').textContent = 'Waiting for them to open it…';
+  $('invite-status').textContent = 'Connecting…';
   show('invite');
-  connect();
 }
 
 // ---------- private chat: joining (person B) ----------
@@ -169,7 +339,7 @@ async function startChat() {
 async function joinChat(room, peerPub) {
   wipe();
   const keys = await newKeyPair();
-  newState({ mode: 'pair', role: 'b', room, keys, session: null });
+  newState({ mode: 'pair', role: 'b', room, keys, session: null, peerPub });
   try {
     state.session = await deriveSession({
       privateKey: keys.privateKey, myPubRaw: keys.pubRaw, peerPub, role: 'b', room,
@@ -177,6 +347,7 @@ async function joinChat(room, peerPub) {
   } catch {
     return end('Broken link', 'This invite link is damaged. Ask for a new one.');
   }
+  save();
   openChatView();
   setConn('Connecting…', false);
   connect();
@@ -208,14 +379,19 @@ async function enterGroup(name) {
   } catch {
     return end('Broken link', 'This group link is damaged. Ask for a new one.');
   }
-  newState({ mode: 'group', room, secret, group, name });
-  const link = `${location.origin}/#g=${room}&s=${secret}`;
-  $('group-link').value = link;
-  drawQr($('group-qr'), link);
+  newState({ mode: 'group', room, secret, group, name, creating });
+  showGroupLink();
   openChatView();
   $('group-invite-panel').hidden = !creating;
   setConn('Connecting…', false);
+  save();
   connect();
+}
+
+function showGroupLink() {
+  const link = `${location.origin}/#g=${state.room}&s=${state.secret}`;
+  $('group-link').value = link;
+  drawQr($('group-qr'), link);
 }
 
 // ---------- server events ----------
@@ -235,28 +411,36 @@ async function handleServer(msg) {
 
   if (msg.type === 'joined') {
     s.myId = msg.id;
-    for (const id of msg.peers) s.peers.add(id);
+    s.online = true;
+    s.retries = 0;
+    if (typeof msg.resume === 'string') s.resume = msg.resume;
+    s.peers = new Set(msg.peers);
+    save();
     if (s.mode === 'group') {
-      ready();
+      if (!s.ready) ready();
       sendBody({ t: 'hi', name: s.name, inCall: false });
+    } else if (s.ready) {
+      // Back after a drop: carry on if they're here, otherwise wait for them.
+      if (msg.peers.length) peerBack(); else peerAway();
     } else if (s.role === 'b') {
       if (msg.peers.length === 0) {
-        setConn('The other person is not here. They may have closed their tab. Ask for a new link.', false);
+        setConn('Waiting for the other person to come back to the chat…', false);
       } else {
         sendHello();
         setConn('Securing…', false);
       }
     }
-    return renderPeople();
+    return renderConnection();
   }
 
   if (msg.type === 'peer-joined') {
     s.peers.add(msg.id);
     if (s.mode === 'pair') {
+      if (s.ready) return peerBack();
       if (s.role === 'b') sendHello();
       if (s.role === 'a' && !s.session) $('invite-status').textContent = 'They opened it. Securing…';
     }
-    return renderPeople();
+    return renderConnection();
   }
 
   if (msg.type === 'peer-left') {
@@ -267,14 +451,15 @@ async function handleServer(msg) {
     s.calls.peerLeft(msg.id);
     setTyping(msg.id, false);
     if (s.mode === 'pair') {
-      if (s.session) return end('Chat ended', 'The other person left. Every message has been wiped from this device.');
-      if (s.role === 'a') $('invite-status').textContent = 'Waiting for them to open it…';
-      return;
+      // Their phone may just have paused the app: wait for them to come back.
+      if (s.ready) return peerAway();
+      return renderConnection();
     }
     const name = s.members.get(msg.id);
     s.members.delete(msg.id);
-    if (name) addNote(`${name} left`);
-    return renderPeople();
+    if (name) addNote(s.leftBy.has(msg.id) ? `${name} left` : `${name} went offline`);
+    s.leftBy.delete(msg.id);
+    return renderConnection();
   }
 
   if (msg.type === 'relay') {
@@ -295,6 +480,8 @@ async function handlePeer(from, env) {
         privateKey: s.keys.privateKey, myPubRaw: s.keys.pubRaw, peerPub: env.pub, role: 'a', room: s.room,
       });
     } catch { return; }
+    s.peerPub = env.pub;
+    s.peerHere = true;
     await sendBody({ t: 'ready' });
     openChatView();
     ready();
@@ -310,10 +497,12 @@ async function handlePeer(from, env) {
     else return;
   } catch { return; } // tampered, replayed or not for us: drop it
   if (!body || typeof body.t !== 'string' || state !== s) return;
+  save();
 
   switch (body.t) {
     case 'ready':
       if (s.mode === 'pair' && s.role === 'b' && !s.ready) {
+        s.peerHere = true;
         ready();
         sendBody({ t: 'hi', name: '', inCall: s.calls.inCall });
       }
@@ -328,9 +517,10 @@ async function handlePeer(from, env) {
       if (!body.reply) {
         // Tell the newcomer who we are.
         sendBody({ t: 'hi', name: s.name, inCall: s.calls.inCall, reply: true }, from);
-        if (s.mode === 'group' && isNew) addNote(`${name} joined`);
+        if (s.mode === 'group' && isNew) addNote(s.knownSids.has(sid) ? `${name} is back` : `${name} joined`);
       }
-      return renderPeople();
+      if (sid) s.knownSids.add(sid);
+      return renderConnection();
     }
 
     case 'typing':
@@ -355,6 +545,7 @@ async function handlePeer(from, env) {
 
     case 'bye':
       if (s.mode === 'pair') end('Chat ended', 'The other person ended the chat. Every message has been wiped from this device.');
+      else s.leftBy.add(from);
       return;
 
     default:
@@ -380,21 +571,40 @@ function openChatView() {
   renderCall();
 }
 
-function ready() {
+function ready({ restored = false } = {}) {
   state.ready = true;
-  for (const id of ['msg-input', 'btn-send', 'btn-attach', 'btn-record']) $(id).disabled = false;
+  save();
+  $('msg-input').disabled = false;
   $('msg-input').focus();
-  addNote(state.mode === 'group'
-    ? 'Messages and files in this group are end-to-end encrypted and are not saved anywhere.'
-    : 'Messages and files are end-to-end encrypted and are not saved anywhere. Tap Verify to check that no one is listening in.');
-  renderPeople();
+  if (restored) {
+    addNote('Welcome back. The page was reloaded, so earlier messages are gone (they are never saved). The chat carries on.');
+  } else {
+    addNote(state.mode === 'group'
+      ? 'Messages and files in this group are end-to-end encrypted and are not saved anywhere.'
+      : 'Messages and files are end-to-end encrypted and are not saved anywhere. Tap Verify to check that no one is listening in.');
+  }
+  renderConnection();
   renderCall();
 }
 
-function renderPeople() {
+/** Status line and which buttons work, from the connection state. */
+function renderConnection() {
   const s = state;
-  if (!s || !s.ready) return;
-  if (s.mode === 'pair') return setConn('End-to-end encrypted', true);
+  if (!s) return;
+  if (!s.ready) {
+    if (s.mode === 'pair' && s.role === 'a' && !s.session) {
+      $('invite-status').textContent = s.online ? 'Waiting for them to open it…' : 'Reconnecting… (the link keeps working)';
+    }
+    return;
+  }
+  const ok = canSend();
+  for (const id of ['btn-send', 'btn-attach', 'btn-record']) $(id).disabled = !ok;
+  if (!s.online) return setConn('Reconnecting…', false);
+  if (s.mode === 'pair') {
+    return s.peerHere
+      ? setConn('End-to-end encrypted', true)
+      : setConn("They're offline. Waiting for them to come back…", false);
+  }
   const total = s.peers.size + 1;
   const named = ['You', ...[...s.peers].filter((id) => s.members.has(id)).map((id) => s.members.get(id))];
   const unnamed = total - named.length;
@@ -501,7 +711,7 @@ function fileUi(li, meta) {
 /** Wait until the connection has room, so big files don't flood it. */
 async function waitForRoom(s) {
   await new Promise((r) => setTimeout(r, 30));
-  while (state === s && s.ws.readyState === WebSocket.OPEN && s.ws.bufferedAmount > 512 * 1024) {
+  while (state === s && s.ws?.readyState === WebSocket.OPEN && s.ws.bufferedAmount > 512 * 1024) {
     await new Promise((r) => setTimeout(r, 50));
   }
 }
@@ -509,7 +719,7 @@ async function waitForRoom(s) {
 /** Queue a file or recording to send. */
 function sendFile(blob, { name, voice = false, duration = 0 } = {}) {
   const s = state;
-  if (!s?.ready) return;
+  if (!canSend()) return;
   const meta = { name: cleanFileName(name || blob.name), size: blob.size, mime: blobType(blob.type), voice, duration };
   const ui = fileUi(bubble('me'), meta);
   if (blob.size === 0) return ui.fail('the file is empty');
@@ -523,13 +733,14 @@ function sendFile(blob, { name, voice = false, duration = 0 } = {}) {
     for (let i = 0; i < chunks; i++) {
       await waitForRoom(s);
       if (state !== s) return;
+      if (!canSend()) throw new Error('connection dropped');
       const piece = new Uint8Array(await blob.slice(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES).arrayBuffer());
       await sendBody({ t: 'file-chunk', id, i, data: b64u(piece) });
       ui.progress((i + 1) / chunks);
     }
     await sendBody({ t: 'file-end', id });
     if (state === s) ui.done(new Blob([blob], { type: meta.mime }));
-  }).catch(() => ui.fail('could not be sent'));
+  }).catch(() => ui.fail('could not be sent (the connection dropped)'));
 }
 
 function receiveFile(from, sid, body) {
@@ -606,7 +817,7 @@ function showRecorder(on) {
 }
 
 async function startRecording() {
-  if (!state?.ready || recorder.active) return;
+  if (!canSend() || recorder.active) return;
   try {
     await recorder.start();
     stopTyping();
@@ -641,7 +852,7 @@ let typingEl = null;
 
 function onTypingInput() {
   const s = state;
-  if (!s?.ready) return;
+  if (!canSend()) return;
   clearTimeout(s.typingIdle);
   if (!$('msg-input').value.trim()) return stopTyping();
   const now = Date.now();
@@ -733,7 +944,7 @@ async function sendMessage(e) {
   e.preventDefault();
   const input = $('msg-input');
   const text = input.value.trim();
-  if (!text || !state?.ready) return;
+  if (!text || !canSend()) return;
   input.value = '';
   quietTyping();
   sendBody({ t: 'text', text });
@@ -742,9 +953,11 @@ async function sendMessage(e) {
 
 async function endChat() {
   const s = state;
+  forget(); // first, and synchronously: the page may be closing
+  if (s) s.closing = true;
   if (s?.ready) {
     s.calls.hangup();
-    if (s.mode === 'pair') sendBody({ t: 'bye' });
+    sendBody({ t: 'bye' });
     await s.sendChain;
   }
   if (s?.mode === 'group') end('You left the group', 'Every message has been wiped from this device.');
@@ -824,10 +1037,17 @@ for (const btn of document.querySelectorAll('[data-copy]')) {
 }
 
 // Wipe when the page is closed.
-addEventListener('pagehide', () => { if (state?.ready) endChat(); else wipe(); });
+// Closing the tab (or reloading it yourself) ends the chat. Switching to
+// another app does not: phones only pause the page then, and if one later
+// drops it from memory and reloads it, the session cache picks the chat up.
+addEventListener('pagehide', (e) => {
+  if (e.persisted) return; // kept in the back/forward cache; we reconnect on return
+  if (state?.ready) endChat(); else wipe();
+});
 
 // Invite links: private /#r=<room>&k=<public key>, group /#g=<room>&s=<secret>
 const params = new URLSearchParams(location.hash.slice(1));
+const saved = loadSaved();
 if (params.get('r') || params.get('g')) {
   // Take the invite out of the address bar and browser history.
   history.replaceState(null, '', location.pathname);
@@ -836,6 +1056,8 @@ if (params.get('r') && params.get('k')) {
   joinChat(params.get('r'), params.get('k'));
 } else if (params.get('g') && params.get('s')) {
   askName({ room: params.get('g'), secret: params.get('s'), creating: false });
+} else if (saved) {
+  restore(saved).catch(() => { wipe(); show('home'); });
 } else {
   show('home');
 }

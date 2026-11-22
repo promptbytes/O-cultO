@@ -1,10 +1,11 @@
 // O-cultO end-to-end encryption, built only on the browser's WebCrypto API.
 //
 // Scheme (v1):
-//   * Each chat uses brand-new ECDH P-256 key pairs, made in memory when the
-//     chat starts and thrown away when it ends (the private keys cannot be
-//     exported). Closing the tab destroys them, which gives forward secrecy
-//     per chat.
+//   * Each chat uses brand-new ECDH P-256 key pairs, made when the chat
+//     starts and thrown away when it ends. While the chat is open, a copy is
+//     kept in this tab's sessionStorage, so the chat survives the phone
+//     pausing or reloading the page when you switch apps. Ending the chat or
+//     closing the tab destroys it, which gives forward secrecy per chat.
 //   * shared = ECDH(myPrivate, theirPublic)
 //   * Two AES-256-GCM keys come from HKDF-SHA256(shared, salt = room id),
 //     one for each direction ("a2b" and "b2a").
@@ -36,11 +37,23 @@ export function randomId(bytes = 18) {
 
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
 
-/** Make a new key pair. The private key cannot be exported. */
+/**
+ * Make a new key pair. `jwk` is the private key in a form that can be kept
+ * in the tab's session cache; the CryptoKey used for maths can't be exported.
+ */
 export async function newKeyPair() {
-  const pair = await crypto.subtle.generateKey(ECDH, false, ['deriveBits']);
+  const pair = await crypto.subtle.generateKey(ECDH, true, ['deriveBits']);
+  const jwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
   const pubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
-  return { privateKey: pair.privateKey, pubRaw, pub: b64u(pubRaw) };
+  return { ...(await importKeyPair(jwk, b64u(pubRaw))) };
+}
+
+/** Rebuild a key pair from the session cache. */
+export async function importKeyPair(jwk, pub) {
+  const privateKey = await crypto.subtle.importKey('jwk', jwk, ECDH, false, ['deriveBits']);
+  const pubRaw = unb64u(pub);
+  if (pubRaw.length !== 65 || pubRaw[0] !== 4) throw new Error('bad public key');
+  return { privateKey, jwk, pubRaw, pub };
 }
 
 async function importPeerPublic(pubB64) {

@@ -97,6 +97,38 @@ test('group room: up to 8 people, broadcast and targeted relay', async () => {
   assert.strictEqual(rooms.size, 0);
 });
 
+test('a rejoin token replaces a dead connection instead of being refused', async () => {
+  const a = await client();
+  a.json({ type: 'join', room: room('r') });
+  const ja = await a.next();
+  assert.match(ja.resume, /^[\w-]{16,}$/);
+  const b = await client();
+  b.json({ type: 'join', room: room('r') });
+  const jb = await b.next();
+  await a.next(); // peer-joined
+
+  // Bob's phone pauses: his old connection lingers. A new one with his token
+  // takes its place (without the token the room would be full).
+  const stranger = await client();
+  stranger.json({ type: 'join', room: room('r'), resume: 'not-the-right-token-at-all' });
+  assert.deepStrictEqual(await stranger.next(), { type: 'error', reason: 'room-full' });
+
+  const b2 = await client();
+  b2.json({ type: 'join', room: room('r'), resume: jb.resume });
+  const jb2 = await b2.next();
+  assert.strictEqual(jb2.type, 'joined');
+  assert.deepStrictEqual(jb2.peers, [ja.id]);
+  assert.notStrictEqual(jb2.resume, jb.resume, 'a fresh token each time');
+  assert.deepStrictEqual(await a.next(), { type: 'peer-left', id: jb.id });
+  assert.deepStrictEqual(await a.next(), { type: 'peer-joined', id: jb2.id });
+  await new Promise((r) => b.once('close', r)); // the old one was cut
+
+  b2.json({ type: 'relay', data: 'hi' });
+  assert.deepStrictEqual(await a.next(), { type: 'relay', from: jb2.id, data: 'hi' });
+  for (const c of [a, b2, stranger]) c.close();
+  await settle();
+});
+
 test('rejects bad room ids', async () => {
   const a = await client();
   a.json({ type: 'join', room: '../etc' });

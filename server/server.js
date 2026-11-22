@@ -176,11 +176,27 @@ wss.on('connection', (ws) => {
       let room = rooms.get(msg.room);
       if (!room) rooms.set(msg.room, (room = { mode, peers: new Map() }));
       if (room.mode !== mode) return send(ws, { type: 'error', reason: 'bad-room' });
+
+      // Coming back after the connection dropped (a phone pausing the app
+      // often leaves a dead connection behind for a while): the secret rejoin
+      // token from last time lets the new connection take the old one's place.
+      if (typeof msg.resume === 'string' && msg.resume.length >= 16 && msg.resume.length <= 64) {
+        for (const [id, peer] of room.peers) {
+          if (peer.resumeToken && peer.resumeToken === msg.resume) {
+            room.peers.delete(id);
+            peer.roomId = null;
+            peer.terminate();
+            for (const other of room.peers.values()) send(other, { type: 'peer-left', id });
+          }
+        }
+      }
+
       if (room.peers.size >= CAPACITY[mode]) return send(ws, { type: 'error', reason: 'room-full' });
       const others = [...room.peers.keys()];
       room.peers.set(ws.peerId, ws);
       ws.roomId = msg.room;
-      send(ws, { type: 'joined', id: ws.peerId, peers: others });
+      ws.resumeToken = crypto.randomBytes(18).toString('base64url');
+      send(ws, { type: 'joined', id: ws.peerId, peers: others, resume: ws.resumeToken });
       for (const [id, peer] of room.peers) if (id !== ws.peerId) send(peer, { type: 'peer-joined', id: ws.peerId });
       return;
     }
@@ -213,7 +229,7 @@ const heartbeat = setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   }
-}, 30_000);
+}, 15_000);
 heartbeat.unref();
 wss.on('close', () => clearInterval(heartbeat));
 

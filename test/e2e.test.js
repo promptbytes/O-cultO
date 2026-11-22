@@ -7,7 +7,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 // Calls are off by default; switch them on here so they stay tested.
 process.env.ENABLE_CALLS = '1';
-const { server, wss } = require('../server/server.js');
+const { server, wss, rooms } = require('../server/server.js');
 const nodeCrypto = require('node:crypto');
 
 // Use a local Playwright if installed, else the global one (cloud sessions
@@ -113,15 +113,25 @@ test('two people chat end to end, and the server only sees ciphertext', { skip: 
   assert.ok(!wire.includes('old oak'), 'server must never see plaintext');
   assert.ok(!wire.includes('see you there'), 'server must never see plaintext');
 
-  // Nothing written to browser storage.
+  // Messages are never written to browser storage. Only the chat's keys sit
+  // in this tab's session cache while the chat is open.
   for (const p of [alice, bob]) {
-    const stored = await p.evaluate(() => localStorage.length + sessionStorage.length + document.cookie.length);
-    assert.strictEqual(stored, 0);
+    const store = await p.evaluate(() => ({
+      local: localStorage.length,
+      cookies: document.cookie.length,
+      keys: Object.keys(sessionStorage),
+      text: JSON.stringify(sessionStorage),
+    }));
+    assert.strictEqual(store.local, 0);
+    assert.strictEqual(store.cookies, 0);
+    assert.deepStrictEqual(store.keys, ['oculto.chat.v1']);
+    assert.ok(!store.text.includes('old oak') && !store.text.includes('see you there'), 'no message text in storage');
   }
 
-  // Ending wipes both sides.
+  // Ending wipes both sides, including the session cache.
   await alice.click('#btn-end');
   await bob.waitForSelector('#view-ended:not([hidden])');
+  for (const p of [alice, bob]) assert.strictEqual(await p.evaluate(() => sessionStorage.length), 0);
   assert.strictEqual(await bob.locator('.msg').count(), 0);
   assert.strictEqual(await alice.locator('.msg').count(), 0);
 });
@@ -389,6 +399,170 @@ test('typing dots in a group say who is typing', SKIP, async () => {
   await ana.waitForSelector('.msg.typing .sender:text("Ben and Cy are typing")');
   await ben.press('#msg-input', 'Enter');
   await ana.waitForSelector('.msg.typing .sender:text("Cy is typing")');
+});
+
+// ---- staying alive when the phone pauses the app ----
+
+/** Cut a person's connection on the server side, like a phone pausing the app. */
+function dropConnection(roomId, index) {
+  const room = rooms.get(roomId);
+  assert.ok(room, 'room should exist');
+  [...room.peers.values()][index].terminate();
+}
+/**
+ * Reload like a phone that dropped a paused page from memory: the page gets
+ * no chance to react, so it must recover from its session cache.
+ */
+async function silentReload(page) {
+  await page.reload();
+}
+
+/** A person whose page never hears that it is being unloaded (see silentReload). */
+async function personWhosePhoneDiscardsPages() {
+  const ctx = await browser.newContext({ permissions: ['microphone'] });
+  await ctx.addInitScript(() => {
+    const add = window.addEventListener;
+    window.addEventListener = function (type, ...rest) {
+      if (type === 'pagehide') return undefined;
+      return add.call(this, type, ...rest);
+    };
+  });
+  return ctx.newPage();
+}
+const roomOf = (link) => new URLSearchParams(new URL(link).hash.slice(1)).get('r');
+
+test('an invite link keeps working after the creator switches apps', SKIP, async () => {
+  const alice = await person();
+  const bob = await person();
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  const link = await alice.inputValue('#invite-link');
+  await alice.waitForSelector('#invite-status:text("Waiting for them")');
+
+  // Alice "goes to WhatsApp": her connection dies. The app reconnects.
+  dropConnection(roomOf(link), 0);
+  await alice.waitForSelector('#invite-status:text("Reconnecting")');
+  await alice.waitForSelector('#invite-status:text("Waiting for them")', { timeout: 10000 });
+
+  // Bob opens the link afterwards and it works.
+  await bob.goto(link);
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted);
+  await bob.fill('#msg-input', 'got your link');
+  await bob.press('#msg-input', 'Enter');
+  await alice.waitForSelector('.msg.them:has-text("got your link")');
+});
+
+test('an invite link keeps working even if the phone reloads the page meanwhile', SKIP, async () => {
+  const alice = await personWhosePhoneDiscardsPages();
+  const bob = await person();
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  const link = await alice.inputValue('#invite-link');
+  await alice.waitForSelector('#invite-status:text("Waiting for them")');
+
+  await silentReload(alice);
+  await alice.waitForSelector('#view-invite:not([hidden])');
+  assert.strictEqual(await alice.inputValue('#invite-link'), link, 'same link after the reload');
+  await alice.waitForSelector('#invite-status:text("Waiting for them")');
+
+  await bob.goto(link);
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted);
+  await alice.fill('#msg-input', 'it still works');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("it still works")');
+});
+
+test('a chat carries on when the other person briefly drops off', SKIP, async () => {
+  const alice = await person();
+  const bob = await person();
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  const link = await alice.inputValue('#invite-link');
+  await bob.goto(link);
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted);
+  await alice.fill('#msg-input', 'before');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("before")');
+
+  // Bob's phone pauses the app. Alice waits instead of ending the chat.
+  dropConnection(roomOf(link), 1);
+  await alice.waitForSelector('#conn-status:text("offline")');
+  assert.ok(await alice.isDisabled('#btn-send'), 'cannot send while they are away');
+  assert.ok(await alice.isVisible('#view-chat'), 'chat is still open');
+
+  // Bob comes back (the app reconnects by itself) and both carry on.
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted, { timeout: 10000 });
+  await bob.fill('#msg-input', 'after');
+  await bob.press('#msg-input', 'Enter');
+  await alice.waitForSelector('.msg.them:has-text("after")');
+  await alice.fill('#msg-input', 'welcome back');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("welcome back")');
+  // Earlier messages are still on screen (the page wasn't reloaded).
+  assert.strictEqual(await bob.locator('.msg.them:has-text("before")').count(), 1);
+});
+
+test('both connections dropping at once does not end the chat', SKIP, async () => {
+  const { alice, bob } = await privateChat();
+  for (const ws of wss.clients) ws.terminate();
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted, { timeout: 15000 });
+  await alice.fill('#msg-input', 'still here');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("still here")');
+});
+
+test('a chat survives the phone reloading the page in the background', SKIP, async () => {
+  const alice = await person();
+  const bob = await personWhosePhoneDiscardsPages();
+  await alice.goto(base);
+  await alice.click('#btn-new');
+  await bob.goto(await alice.inputValue('#invite-link'));
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted);
+  await alice.fill('#msg-input', 'one');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("one")');
+
+  // The OS throws the page out of memory (the app never hears about it),
+  // then reloads it when Bob comes back.
+  await silentReload(bob);
+  await bob.waitForSelector('.note:has-text("Welcome back")');
+  for (const p of [alice, bob]) await p.waitForSelector(encrypted, { timeout: 15000 });
+
+  // Same keys, counters carry on: messages flow both ways.
+  await bob.fill('#msg-input', 'two');
+  await bob.press('#msg-input', 'Enter');
+  await alice.waitForSelector('.msg.them:has-text("two")');
+  await alice.fill('#msg-input', 'three');
+  await alice.press('#msg-input', 'Enter');
+  await bob.waitForSelector('.msg.them:has-text("three")');
+  // Earlier messages were never stored, so they're gone after the reload.
+  assert.strictEqual(await bob.locator('.msg:has-text("one")').count(), 0);
+});
+
+test('a group survives a member reloading, and says they are back', SKIP, async () => {
+  const ana = await person();
+  await ana.goto(base);
+  await ana.click('#btn-new-group');
+  await ana.fill('#name-input', 'Ana');
+  await ana.click('#name-form button');
+  const link = await ana.inputValue('#group-link');
+  const ben = await personWhosePhoneDiscardsPages();
+  await joinGroup(ben, link, 'Ben');
+  for (const p of [ana, ben]) await p.waitForSelector('#conn-status:text("2 people")');
+
+  await silentReload(ben);
+  await ana.waitForSelector('.note:has-text("Ben is back")', { timeout: 20000 });
+  await ben.fill('#msg-input', 'hello again');
+  await ben.press('#msg-input', 'Enter');
+  await ana.waitForSelector('.msg.them:has-text("hello again")');
+  assert.strictEqual(await ana.textContent('.msg.them .sender'), 'Ben');
+});
+
+test('closing the tab still ends the chat for the other person right away', SKIP, async () => {
+  const { alice, bob } = await privateChat();
+  await bob.close({ runBeforeUnload: true });
+  await alice.waitForSelector('#view-ended:not([hidden])', { timeout: 5000 });
+  assert.match(await alice.textContent('#ended-text'), /ended the chat/);
 });
 
 test('a used link cannot be opened by a third person', { skip: !chromium && 'playwright not available' }, async () => {
