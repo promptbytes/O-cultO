@@ -1,0 +1,4 @@
+{$DOMAIN} {
+	# No access log: Caddy keeps none unless one is configured.
+	reverse_proxy app:8080
+}
