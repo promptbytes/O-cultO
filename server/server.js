@@ -103,7 +103,8 @@ const BUILD = (() => {
   const h = crypto.createHash('sha256');
   const files = fs.readdirSync(PUBLIC_DIR).sort().map((f) => path.join(PUBLIC_DIR, f));
   for (const f of [...files, ...Object.values(VENDOR)]) {
-    if (fs.statSync(f).isFile()) h.update(f).update(fs.readFileSync(f));
+    // Names and contents only, so the same code has the same version anywhere.
+    if (fs.statSync(f).isFile()) h.update(path.basename(f)).update(fs.readFileSync(f));
   }
   return h.digest('hex').slice(0, 12);
 })();
