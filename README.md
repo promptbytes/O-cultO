@@ -29,6 +29,10 @@ npm test           # relay tests + two-browser end-to-end tests (needs Playwrigh
 
 Browsers only allow the encryption API (and the microphone) on `https://` or `localhost`, so anything public must be served over HTTPS.
 
+### Host it on Render (free, no server needed)
+
+`render.yaml` sets everything up. On https://render.com: sign in with GitHub, choose **New → Blueprint**, pick this repository, and confirm. Render builds it and gives it an `https://….onrender.com` address. Free apps sleep after 15 minutes without visitors and take about a minute to wake on the next visit; the paid "Starter" plan stays awake.
+
 ### Self-host with HTTPS
 
 `deploy/` has a Docker Compose kit: the app, Caddy for automatic HTTPS certificates, and an optional coturn server that helps calls get through strict networks. All logging is off.

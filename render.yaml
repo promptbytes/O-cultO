@@ -1,0 +1,16 @@
+# One-click hosting on Render (https://render.com): New > Blueprint > pick
+# this repo. Render gives the app an https address and keeps it updated
+# from GitHub.
+services:
+  - type: web
+    name: o-culto
+    runtime: node
+    plan: free
+    branch: claude/cloud-environment-setup-3ls57q
+    buildCommand: npm ci --omit=dev --no-audit --no-fund
+    startCommand: node server/server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
