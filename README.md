@@ -31,7 +31,7 @@ Browsers only allow the encryption API (and the microphone) on `https://` or `lo
 
 ### Host it on Render (free, no server needed)
 
-`render.yaml` sets everything up. On https://render.com: sign in with GitHub, choose **New → Blueprint**, pick this repository, and confirm. Render builds it and gives it an `https://….onrender.com` address. Free apps sleep after 15 minutes without visitors and take about a minute to wake on the next visit; the paid "Starter" plan stays awake.
+`render.yaml` sets everything up. On https://render.com: sign in with GitHub, choose **New → Blueprint**, pick this repository and the `main` branch, and confirm. Every change merged into `main` goes live automatically. Render builds it and gives it an `https://….onrender.com` address. Free apps sleep after 15 minutes without visitors and take about a minute to wake on the next visit; the paid "Starter" plan stays awake.
 
 ### Self-host with HTTPS
 
